@@ -360,6 +360,30 @@ fn transfer_tokens_with_hook_support(
     signer_seeds: Option<&[&[&[u8]]]>,
 ) -> Result<()> {
     use anchor_spl::token_interface;
+    use spl_token_2022::extension::{ExtensionType, StateWithExtensions};
+    use spl_token_2022::extension::transfer_hook::TransferHook;
+
+    let mut remaining_accounts: Vec<AccountInfo> = Vec::new();
+
+    // Check if the mint is a Token-2022 mint and has a TransferHook extension
+    let mint_info = mint.to_account_info();
+    if mint_info.owner == &spl_token_2022::ID {
+        if let Ok(mint_data_with_extensions) = StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_info.data.borrow()) {
+            if let Ok(transfer_hook_extension) = mint_data_with_extensions.get_extension::<TransferHook>() {
+                // If the mint has a transfer hook, ensure the hook program account is provided
+                if let Some(hook_program_acc) = transfer_hook_program {
+                    remaining_accounts.push(hook_program_acc.to_account_info());
+                    // NOTE: If the specific transfer hook requires *other* accounts,
+                    // they would also need to be added to `remaining_accounts` here.
+                    // For a generic AMM, this is a common point of customization.
+                } else {
+                    // This case should ideally be caught by the `validate_transfer_hook_program` constraint
+                    // but it's good to be explicit.
+                    return Err(TradiumError::MissingTransferHookProgram.into());
+                }
+            }
+        }
+    }
 
     let transfer_ctx = if let Some(seeds) = signer_seeds {
         CpiContext::new_with_signer(
@@ -382,9 +406,9 @@ fn transfer_tokens_with_hook_support(
         )
     };
 
-    // For Token-2022 with transfer hooks, additional accounts may be needed
-    // This is a simplified implementation - full implementation would require
-    // passing additional accounts required by the specific transfer hook
+    // Add remaining_accounts to the CPI context
+    let transfer_ctx = transfer_ctx.with_remaining_accounts(remaining_accounts);
+
     token_interface::transfer(transfer_ctx, amount)?;
 
     Ok(())
