@@ -2,6 +2,11 @@ use crate::errors::TradiumError;
 use crate::state::Tradium;
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, MintTo, Token, TokenAccount, Transfer};
+use anchor_spl::token_interface::{
+    Mint as MintInterface, TokenAccount as TokenAccountInterface, TokenInterface,
+};
+use spl_token_2022::extension::transfer_hook::TransferHook;
+use spl_token_2022::extension::{ExtensionType, StateWithExtensions};
 
 #[derive(Accounts)]
 pub struct Deposit<'info> {
@@ -9,37 +14,52 @@ pub struct Deposit<'info> {
     pub pool: Account<'info, Tradium>,
 
     #[account(mut)]
-    pub user_coin_account: Account<'info, TokenAccount>,
+    pub user_coin_account: InterfaceAccount<'info, TokenAccountInterface>,
 
     #[account(mut)]
-    pub user_pc_account: Account<'info, TokenAccount>,
+    pub user_pc_account: InterfaceAccount<'info, TokenAccountInterface>,
 
     #[account(mut)]
     pub user_lp_account: Account<'info, TokenAccount>,
 
     #[account(mut)]
-    pub coin_vault: Account<'info, TokenAccount>,
+    pub coin_vault: InterfaceAccount<'info, TokenAccountInterface>,
 
     #[account(mut)]
-    pub pc_vault: Account<'info, TokenAccount>,
+    pub pc_vault: InterfaceAccount<'info, TokenAccountInterface>,
 
     #[account(mut)]
     pub lp_mint: Account<'info, Mint>,
 
+    pub coin_mint: InterfaceAccount<'info, MintInterface>,
+    pub pc_mint: InterfaceAccount<'info, MintInterface>,
+
     pub user: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
-
-    /// CHECK: This account will be validated based on the pool's stored token program ID
-    pub coin_token_program_id: UncheckedAccount<'info>,
-
-    /// CHECK: This account will be validated based on the pool's stored token program ID
-    pub pc_token_program_id: UncheckedAccount<'info>,
+    pub coin_token_program: Interface<'info, TokenInterface>,
+    pub pc_token_program: Interface<'info, TokenInterface>,
 
     /// CHECK: Optional, only required if coin_mint has a transfer hook
+    #[account(
+        constraint = validate_transfer_hook_program(
+            &coin_mint,
+            &coin_transfer_hook_program,
+            &pool.whitelisted_transfer_hooks,
+            pool.num_whitelisted_hooks
+        ) @ TradiumError::InvalidTransferHookProgram
+    )]
     pub coin_transfer_hook_program: Option<UncheckedAccount<'info>>,
 
     /// CHECK: Optional, only required if pc_mint has a transfer hook
+    #[account(
+        constraint = validate_transfer_hook_program(
+            &pc_mint,
+            &pc_transfer_hook_program,
+            &pool.whitelisted_transfer_hooks,
+            pool.num_whitelisted_hooks
+        ) @ TradiumError::InvalidTransferHookProgram
+    )]
     pub pc_transfer_hook_program: Option<UncheckedAccount<'info>>,
 }
 
@@ -52,17 +72,17 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
         TradiumError::InvalidDepositAmount
     );
 
-    // Validate token program IDs
+    // Validate token programs match pool configuration
     require!(
-        ctx.accounts.coin_token_program_id.key() == pool.coin_vault_mint,
+        ctx.accounts.coin_token_program.key() == pool.coin_token_program,
         TradiumError::InvalidCoinTokenProgram
     );
     require!(
-        ctx.accounts.pc_token_program_id.key() == pool.pc_vault_mint,
+        ctx.accounts.pc_token_program.key() == pool.pc_token_program,
         TradiumError::InvalidPcTokenProgram
     );
 
-    // Validate vaults match pool configuration
+    // Validate vaults and mints match pool configuration
     require!(
         ctx.accounts.coin_vault.key() == pool.coin_vault,
         TradiumError::InvalidCoinVault
@@ -75,23 +95,14 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
         ctx.accounts.lp_mint.key() == pool.lp_mint,
         TradiumError::InvalidLpMint
     );
-
-    // Check if Token-2022 with transfer hooks
-    let coin_is_token_2022 = ctx.accounts.coin_token_program_id.key() == spl_token_2022::ID;
-    let pc_is_token_2022 = ctx.accounts.pc_token_program_id.key() == spl_token_2022::ID;
-
-    // If Token-2022, validate transfer hook programs if provided
-    if coin_is_token_2022 && ctx.accounts.coin_transfer_hook_program.is_some() {
-        let hook_program = ctx.accounts.coin_transfer_hook_program.as_ref().unwrap();
-        // Note: You'll need to add a whitelisted_transfer_hooks field to your Tradium struct
-        // For now, we'll assume any provided hook program is valid
-        msg!("Using coin transfer hook program: {}", hook_program.key());
-    }
-
-    if pc_is_token_2022 && ctx.accounts.pc_transfer_hook_program.is_some() {
-        let hook_program = ctx.accounts.pc_transfer_hook_program.as_ref().unwrap();
-        msg!("Using pc transfer hook program: {}", hook_program.key());
-    }
+    require!(
+        ctx.accounts.coin_mint.key() == pool.coin_vault_mint,
+        TradiumError::InvalidCoinMint
+    );
+    require!(
+        ctx.accounts.pc_mint.key() == pool.pc_vault_mint,
+        TradiumError::InvalidPcMint
+    );
 
     // Get current vault balances before deposit
     let coin_vault_balance_before = ctx.accounts.coin_vault.amount;
@@ -100,106 +111,60 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
 
     // Transfer coin tokens from user to vault if amount > 0
     if amount_coin > 0 {
-        let transfer_ctx = CpiContext::new(
-            ctx.accounts.coin_token_program_id.to_account_info(),
-            Transfer {
-                from: ctx.accounts.user_coin_account.to_account_info(),
-                to: ctx.accounts.coin_vault.to_account_info(),
-                authority: ctx.accounts.user.to_account_info(),
-            },
-        );
-
-        if coin_is_token_2022 && ctx.accounts.coin_transfer_hook_program.is_some() {
-            // For Token-2022 with transfer hooks, you'd need to include additional accounts
-            // This is a simplified version - actual implementation would require hook-specific accounts
-            token::transfer(transfer_ctx, amount_coin)?;
-        } else {
-            token::transfer(transfer_ctx, amount_coin)?;
-        }
+        transfer_tokens_with_hook_support(
+            &ctx.accounts.coin_token_program,
+            &ctx.accounts.user_coin_account,
+            &ctx.accounts.coin_vault,
+            &ctx.accounts.user,
+            &ctx.accounts.coin_mint,
+            &ctx.accounts.coin_transfer_hook_program,
+            amount_coin,
+        )?;
     }
 
     // Transfer PC tokens from user to vault if amount > 0
     if amount_pc > 0 {
-        let transfer_ctx = CpiContext::new(
-            ctx.accounts.pc_token_program_id.to_account_info(),
-            Transfer {
-                from: ctx.accounts.user_pc_account.to_account_info(),
-                to: ctx.accounts.pc_vault.to_account_info(),
-                authority: ctx.accounts.user.to_account_info(),
-            },
-        );
-
-        if pc_is_token_2022 && ctx.accounts.pc_transfer_hook_program.is_some() {
-            // For Token-2022 with transfer hooks, you'd need to include additional accounts
-            token::transfer(transfer_ctx, amount_pc)?;
-        } else {
-            token::transfer(transfer_ctx, amount_pc)?;
-        }
+        transfer_tokens_with_hook_support(
+            &ctx.accounts.pc_token_program,
+            &ctx.accounts.user_pc_account,
+            &ctx.accounts.pc_vault,
+            &ctx.accounts.user,
+            &ctx.accounts.pc_mint,
+            &ctx.accounts.pc_transfer_hook_program,
+            amount_pc,
+        )?;
     }
 
     // Calculate LP tokens to mint
-    let lp_amount = if total_lp_supply == 0 {
-        // Initial deposit - use geometric mean
-        let coin_amount_normalized = amount_coin
-            .checked_mul(10_u64.pow(pool.sys_decimal_value as u32))
-            .ok_or(TradiumError::MathOverflow)?
-            .checked_div(10_u64.pow(pool.coin_decimals as u32))
-            .ok_or(TradiumError::MathOverflow)?;
-
-        let pc_amount_normalized = amount_pc
-            .checked_mul(10_u64.pow(pool.sys_decimal_value as u32))
-            .ok_or(TradiumError::MathOverflow)?
-            .checked_div(10_u64.pow(pool.pc_decimals as u32))
-            .ok_or(TradiumError::MathOverflow)?;
-
-        // Simple geometric mean calculation (sqrt(a * b))
-        // In production, you'd want a more sophisticated calculation
-        let product = coin_amount_normalized
-            .checked_mul(pc_amount_normalized)
-            .ok_or(TradiumError::MathOverflow)?;
-
-        // Simplified square root - in production use a proper sqrt implementation
-        let mut lp_amount = 1u64;
-        while lp_amount.checked_mul(lp_amount).unwrap_or(u64::MAX) < product {
-            lp_amount = lp_amount.checked_add(1).ok_or(TradiumError::MathOverflow)?;
-        }
-        lp_amount
-    } else {
-        // Subsequent deposits - maintain proportional shares
-        let coin_share = if coin_vault_balance_before > 0 {
-            amount_coin
-                .checked_mul(total_lp_supply)
-                .ok_or(TradiumError::MathOverflow)?
-                .checked_div(coin_vault_balance_before)
-                .ok_or(TradiumError::MathOverflow)?
-        } else {
-            0
-        };
-
-        let pc_share = if pc_vault_balance_before > 0 {
-            amount_pc
-                .checked_mul(total_lp_supply)
-                .ok_or(TradiumError::MathOverflow)?
-                .checked_div(pc_vault_balance_before)
-                .ok_or(TradiumError::MathOverflow)?
-        } else {
-            0
-        };
-
-        // Use the minimum of the two shares to prevent dilution
-        std::cmp::min(coin_share, pc_share)
-    };
+    let lp_amount = calculate_lp_tokens(
+        pool,
+        amount_coin,
+        amount_pc,
+        coin_vault_balance_before,
+        pc_vault_balance_before,
+        total_lp_supply,
+    )?;
 
     require!(lp_amount > 0, TradiumError::InsufficientLiquidityMinted);
 
+    // Create mint authority seeds for PDA signing
+    let mint_authority_bump = pool.nonce as u8;
+    let mint_authority_seeds = &[
+        b"mint_authority",
+        pool.key().as_ref(),
+        &[mint_authority_bump],
+    ];
+    let signer_seeds = &[mint_authority_seeds.as_slice()];
+
     // Mint LP tokens to user
-    let mint_ctx = CpiContext::new(
+    let mint_ctx = CpiContext::new_with_signer(
         ctx.accounts.token_program.to_account_info(),
         MintTo {
             mint: ctx.accounts.lp_mint.to_account_info(),
             to: ctx.accounts.user_lp_account.to_account_info(),
-            authority: pool.to_account_info(), // Pool should be the mint authority
+            authority: pool.to_account_info(),
         },
+        signer_seeds,
     );
 
     token::mint_to(mint_ctx, lp_amount)?;
@@ -224,4 +189,159 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
     );
 
     Ok(())
+}
+
+fn validate_transfer_hook_program(
+    mint: &InterfaceAccount<MintInterface>,
+    transfer_hook_program: &Option<UncheckedAccount>,
+    whitelisted_hooks: &[Pubkey],
+    num_whitelisted: u8,
+) -> bool {
+    // Check if mint has transfer hook extension
+    let mint_info = mint.to_account_info();
+    let mint_data = mint_info.data.borrow();
+
+    // For Token-2022 mints, check for transfer hook extension
+    if mint_info.owner == &spl_token_2022::ID {
+        match StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_data) {
+            Ok(mint_with_extensions) => {
+                if let Ok(transfer_hook_account) =
+                    mint_with_extensions.get_extension::<TransferHook>()
+                {
+                    // Mint has transfer hook - validate the provided program
+                    if let Some(hook_program) = transfer_hook_program {
+                        let hook_program_id = transfer_hook_account.program_id;
+
+                        // Check if the hook program matches the mint's hook
+                        if hook_program.key() != hook_program_id {
+                            return false;
+                        }
+
+                        // Check if the hook program is whitelisted
+                        for i in 0..(num_whitelisted as usize) {
+                            if whitelisted_hooks[i] == hook_program_id {
+                                return true;
+                            }
+                        }
+                        return false; // Hook program not whitelisted
+                    } else {
+                        return false; // Mint has hook but no program provided
+                    }
+                } else {
+                    // Mint doesn't have transfer hook - shouldn't provide hook program
+                    return transfer_hook_program.is_none();
+                }
+            }
+            Err(_) => return false,
+        }
+    } else {
+        // Regular SPL token - shouldn't have transfer hook program
+        return transfer_hook_program.is_none();
+    }
+}
+
+fn transfer_tokens_with_hook_support(
+    token_program: &Interface<TokenInterface>,
+    from: &InterfaceAccount<TokenAccountInterface>,
+    to: &InterfaceAccount<TokenAccountInterface>,
+    authority: &Signer,
+    mint: &InterfaceAccount<MintInterface>,
+    transfer_hook_program: &Option<UncheckedAccount>,
+    amount: u64,
+) -> Result<()> {
+    use anchor_spl::token_interface;
+
+    let transfer_ctx = CpiContext::new(
+        token_program.to_account_info(),
+        token_interface::Transfer {
+            from: from.to_account_info(),
+            to: to.to_account_info(),
+            authority: authority.to_account_info(),
+        },
+    );
+
+    // For Token-2022 with transfer hooks, additional accounts may be needed
+    // This is a simplified implementation - full implementation would require
+    // passing additional accounts required by the specific transfer hook
+    token_interface::transfer(transfer_ctx, amount)?;
+
+    Ok(())
+}
+
+fn calculate_lp_tokens(
+    pool: &Tradium,
+    amount_coin: u64,
+    amount_pc: u64,
+    coin_vault_balance_before: u64,
+    pc_vault_balance_before: u64,
+    total_lp_supply: u64,
+) -> Result<u64> {
+    let lp_amount = if total_lp_supply == 0 {
+        // Initial deposit - use geometric mean with proper decimal handling
+        let coin_amount_normalized =
+            normalize_amount(amount_coin, pool.coin_decimals, pool.sys_decimal_value)?;
+        let pc_amount_normalized =
+            normalize_amount(amount_pc, pool.pc_decimals, pool.sys_decimal_value)?;
+
+        // Calculate geometric mean: sqrt(coin_normalized * pc_normalized)
+        integer_sqrt(
+            coin_amount_normalized
+                .checked_mul(pc_amount_normalized)
+                .ok_or(TradiumError::MathOverflow)?,
+        )?
+    } else {
+        // Subsequent deposits - maintain proportional shares
+        let coin_share = if coin_vault_balance_before > 0 && amount_coin > 0 {
+            amount_coin
+                .checked_mul(total_lp_supply)
+                .ok_or(TradiumError::MathOverflow)?
+                .checked_div(coin_vault_balance_before)
+                .ok_or(TradiumError::MathOverflow)?
+        } else {
+            0
+        };
+
+        let pc_share = if pc_vault_balance_before > 0 && amount_pc > 0 {
+            amount_pc
+                .checked_mul(total_lp_supply)
+                .ok_or(TradiumError::MathOverflow)?
+                .checked_div(pc_vault_balance_before)
+                .ok_or(TradiumError::MathOverflow)?
+        } else {
+            0
+        };
+
+        // Use the minimum of the two shares to prevent dilution attacks
+        std::cmp::min(coin_share, pc_share)
+    };
+
+    Ok(lp_amount)
+}
+
+fn normalize_amount(amount: u64, token_decimals: u64, sys_decimals: u64) -> Result<u64> {
+    if sys_decimals >= token_decimals {
+        amount
+            .checked_mul(10_u64.pow((sys_decimals - token_decimals) as u32))
+            .ok_or(TradiumError::MathOverflow.into())
+    } else {
+        amount
+            .checked_div(10_u64.pow((token_decimals - sys_decimals) as u32))
+            .ok_or(TradiumError::MathOverflow.into())
+    }
+}
+
+fn integer_sqrt(n: u64) -> Result<u64> {
+    if n == 0 {
+        return Ok(0);
+    }
+
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+
+    Ok(x)
 }
