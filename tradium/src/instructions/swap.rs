@@ -4,6 +4,8 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use anchor_spl::token_2022::{self, Token2022};
 use anchor_spl::token_interface::{Mint, TokenAccount as TokenInterfaceAccount, TokenInterface};
+use spl_token_2022::extension::transfer_hook::TransferHook;
+use spl_token_2022::extension::{ExtensionType, StateWithExtensions};
 
 #[derive(Accounts)]
 pub struct Swap<'info> {
@@ -54,15 +56,27 @@ pub struct Swap<'info> {
     /// Token program for output token  
     pub output_token_program: Interface<'info, TokenInterface>,
 
-    /// Optional transfer hook program for input token (Token-2022)
-    /// CHECK: Validated in instruction logic
-    #[account()]
-    pub input_transfer_hook_program: Option<UncheckedAccount<'info>>,
+    /// CHECK: Optional, only required if coin_mint has a transfer hook
+    #[account(
+        constraint = validate_transfer_hook_program(
+            &coin_mint,
+            &coin_transfer_hook_program,
+            &pool.whitelisted_transfer_hooks,
+            pool.num_whitelisted_hooks
+        ) @ TradiumError::InvalidTransferHookProgram
+    )]
+    pub coin_transfer_hook_program: Option<UncheckedAccount<'info>>,
 
-    /// Optional transfer hook program for output token (Token-2022)
-    /// CHECK: Validated in instruction logic
-    #[account()]
-    pub output_transfer_hook_program: Option<UncheckedAccount<'info>>,
+    /// CHECK: Optional, only required if pc_mint has a transfer hook
+    #[account(
+        constraint = validate_transfer_hook_program(
+            &pc_mint,
+            &pc_transfer_hook_program,
+            &pool.whitelisted_transfer_hooks,
+            pool.num_whitelisted_hooks
+        ) @ TradiumError::InvalidTransferHookProgram
+    )]
+    pub pc_transfer_hook_program: Option<UncheckedAccount<'info>>,
 }
 
 pub fn swap(
@@ -79,8 +93,23 @@ pub fn swap(
     // Validate minimum input amount
     require!(amount_in > 0, TradiumError::InvalidInputAmount);
 
-    // Validate token program IDs
-    validate_token_programs(&ctx, swap_direction)?;
+    // Validate token program IDs match pool configuration
+    let (input_program_expected, output_program_expected) = if swap_direction == 0 {
+        // Coin to PC swap
+        (pool.coin_token_program, pool.pc_token_program)
+    } else {
+        // PC to Coin swap
+        (pool.pc_token_program, pool.coin_token_program)
+    };
+
+    require!(
+        ctx.accounts.input_token_program.key() == input_program_expected,
+        TradiumError::InvalidTokenProgram
+    );
+    require!(
+        ctx.accounts.output_token_program.key() == output_program_expected,
+        TradiumError::InvalidTokenProgram
+    );
 
     // Get vault balances before swap
     let coin_vault_balance = ctx.accounts.coin_vault.amount;
@@ -115,42 +144,53 @@ pub fn swap(
     Ok(())
 }
 
-fn validate_token_programs(ctx: &Context<Swap>, swap_direction: u8) -> Result<()> {
-    // Validate input token program
-    let input_program_id = if swap_direction == 0 {
-        &ctx.accounts.input_token_program.key()
+fn validate_transfer_hook_program(
+    mint: &InterfaceAccount<Mint>,
+    transfer_hook_program: &Option<UncheckedAccount>,
+    whitelisted_hooks: &[Pubkey],
+    num_whitelisted: u8,
+) -> bool {
+    // Check if mint has transfer hook extension
+    let mint_info = mint.to_account_info();
+    let mint_data = mint_info.data.borrow();
+
+    // For Token-2022 mints, check for transfer hook extension
+    if mint_info.owner == &spl_token_2022::ID {
+        match StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_data) {
+            Ok(mint_with_extensions) => {
+                if let Ok(transfer_hook_account) =
+                    mint_with_extensions.get_extension::<TransferHook>()
+                {
+                    // Mint has transfer hook - validate the provided program
+                    if let Some(hook_program) = transfer_hook_program {
+                        let hook_program_id = transfer_hook_account.program_id;
+
+                        // Check if the hook program matches the mint's hook
+                        if hook_program.key() != hook_program_id {
+                            return false;
+                        }
+
+                        // Check if the hook program is whitelisted
+                        for i in 0..(num_whitelisted as usize) {
+                            if whitelisted_hooks[i] == hook_program_id {
+                                return true;
+                            }
+                        }
+                        return false; // Hook program not whitelisted
+                    } else {
+                        return false; // Mint has hook but no program provided
+                    }
+                } else {
+                    // Mint doesn't have transfer hook - shouldn't provide hook program
+                    return transfer_hook_program.is_none();
+                }
+            }
+            Err(_) => return false,
+        }
     } else {
-        &ctx.accounts.input_token_program.key()
-    };
-
-    require!(
-        *input_program_id == Token::id() || *input_program_id == Token2022::id(),
-        TradiumError::InvalidTokenProgram
-    );
-
-    // Validate output token program
-    let output_program_id = &ctx.accounts.output_token_program.key();
-    require!(
-        *output_program_id == Token::id() || *output_program_id == Token2022::id(),
-        TradiumError::InvalidTokenProgram
-    );
-
-    // Validate transfer hook programs if Token-2022
-    if *input_program_id == Token2022::id() {
-        if let Some(hook_program) = &ctx.accounts.input_transfer_hook_program {
-            // Additional validation for transfer hook program can be added here
-            msg!("Input transfer hook program: {}", hook_program.key());
-        }
+        // Regular SPL token - shouldn't have transfer hook program
+        return transfer_hook_program.is_none();
     }
-
-    if *output_program_id == Token2022::id() {
-        if let Some(hook_program) = &ctx.accounts.output_transfer_hook_program {
-            // Additional validation for transfer hook program can be added here
-            msg!("Output transfer hook program: {}", hook_program.key());
-        }
-    }
-
-    Ok(())
 }
 
 fn swap_coin_to_pc(
@@ -243,128 +283,109 @@ fn execute_swap_transfers(
     amount_out: u64,
     swap_direction: u8,
 ) -> Result<()> {
+    // Create pool authority seeds for CPI signing
+    let pool_seeds = &[
+        b"tradium",
+        ctx.accounts.coin_vault.mint.as_ref(),
+        ctx.accounts.pc_vault.mint.as_ref(),
+        &[ctx.bumps.pool],
+    ];
+    let pool_signer = &[&pool_seeds[..]];
+
     if swap_direction == 0 {
         // Coin to PC swap
 
         // Transfer input tokens (coin) from user to coin vault
-        let input_transfer_ctx = CpiContext::new(
-            ctx.accounts.input_token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.user_input_token_account.to_account_info(),
-                to: ctx.accounts.coin_vault.to_account_info(),
-                authority: ctx.accounts.user.to_account_info(),
-            },
-        );
-
-        if ctx.accounts.input_token_program.key() == Token2022::id() {
-            // Handle Token-2022 transfer with optional hook
-            if ctx.accounts.input_transfer_hook_program.is_some() {
-                // Include transfer hook accounts if needed
-                token_2022::transfer_checked(
-                    input_transfer_ctx,
-                    amount_in,
-                    ctx.accounts.coin_mint.decimals,
-                )?;
-            } else {
-                token_2022::transfer(input_transfer_ctx, amount_in)?;
-            }
-        } else {
-            token::transfer(input_transfer_ctx, amount_in)?;
-        }
+        transfer_tokens_with_hook_support(
+            &ctx.accounts.input_token_program,
+            &ctx.accounts.user_input_token_account,
+            &ctx.accounts.coin_vault,
+            &ctx.accounts.user.to_account_info(),
+            &ctx.accounts.coin_mint,
+            &ctx.accounts.coin_transfer_hook_program,
+            amount_in,
+            None,
+        )?;
 
         // Transfer output tokens (pc) from pc vault to user
-        let pool_seeds = &[
-            b"tradium",
-            ctx.accounts.coin_vault.mint.as_ref(),
-            ctx.accounts.pc_vault.mint.as_ref(),
-            &[ctx.bumps.pool],
-        ];
-        let pool_signer = &[&pool_seeds[..]];
-
-        let output_transfer_ctx = CpiContext::new_with_signer(
-            ctx.accounts.output_token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.pc_vault.to_account_info(),
-                to: ctx.accounts.user_output_token_account.to_account_info(),
-                authority: ctx.accounts.pool.to_account_info(),
-            },
-            pool_signer,
-        );
-
-        if ctx.accounts.output_token_program.key() == Token2022::id() {
-            // Handle Token-2022 transfer with optional hook
-            if ctx.accounts.output_transfer_hook_program.is_some() {
-                token_2022::transfer_checked(
-                    output_transfer_ctx,
-                    amount_out,
-                    ctx.accounts.pc_mint.decimals,
-                )?;
-            } else {
-                token_2022::transfer(output_transfer_ctx, amount_out)?;
-            }
-        } else {
-            token::transfer(output_transfer_ctx, amount_out)?;
-        }
+        transfer_tokens_with_hook_support(
+            &ctx.accounts.output_token_program,
+            &ctx.accounts.pc_vault,
+            &ctx.accounts.user_output_token_account,
+            &ctx.accounts.pool.to_account_info(),
+            &ctx.accounts.pc_mint,
+            &ctx.accounts.pc_transfer_hook_program,
+            amount_out,
+            Some(pool_signer),
+        )?;
     } else {
         // PC to Coin swap
 
         // Transfer input tokens (pc) from user to pc vault
-        let input_transfer_ctx = CpiContext::new(
-            ctx.accounts.input_token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.user_input_token_account.to_account_info(),
-                to: ctx.accounts.pc_vault.to_account_info(),
-                authority: ctx.accounts.user.to_account_info(),
-            },
-        );
-
-        if ctx.accounts.input_token_program.key() == Token2022::id() {
-            if ctx.accounts.input_transfer_hook_program.is_some() {
-                token_2022::transfer_checked(
-                    input_transfer_ctx,
-                    amount_in,
-                    ctx.accounts.pc_mint.decimals,
-                )?;
-            } else {
-                token_2022::transfer(input_transfer_ctx, amount_in)?;
-            }
-        } else {
-            token::transfer(input_transfer_ctx, amount_in)?;
-        }
+        transfer_tokens_with_hook_support(
+            &ctx.accounts.input_token_program,
+            &ctx.accounts.user_input_token_account,
+            &ctx.accounts.pc_vault,
+            &ctx.accounts.user.to_account_info(),
+            &ctx.accounts.pc_mint,
+            &ctx.accounts.pc_transfer_hook_program,
+            amount_in,
+            None,
+        )?;
 
         // Transfer output tokens (coin) from coin vault to user
-        let pool_seeds = &[
-            b"tradium",
-            ctx.accounts.coin_vault.mint.as_ref(),
-            ctx.accounts.pc_vault.mint.as_ref(),
-            &[ctx.bumps.pool],
-        ];
-        let pool_signer = &[&pool_seeds[..]];
-
-        let output_transfer_ctx = CpiContext::new_with_signer(
-            ctx.accounts.output_token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.coin_vault.to_account_info(),
-                to: ctx.accounts.user_output_token_account.to_account_info(),
-                authority: ctx.accounts.pool.to_account_info(),
-            },
-            pool_signer,
-        );
-
-        if ctx.accounts.output_token_program.key() == Token2022::id() {
-            if ctx.accounts.output_transfer_hook_program.is_some() {
-                token_2022::transfer_checked(
-                    output_transfer_ctx,
-                    amount_out,
-                    ctx.accounts.coin_mint.decimals,
-                )?;
-            } else {
-                token_2022::transfer(output_transfer_ctx, amount_out)?;
-            }
-        } else {
-            token::transfer(output_transfer_ctx, amount_out)?;
-        }
+        transfer_tokens_with_hook_support(
+            &ctx.accounts.output_token_program,
+            &ctx.accounts.coin_vault,
+            &ctx.accounts.user_output_token_account,
+            &ctx.accounts.pool.to_account_info(),
+            &ctx.accounts.coin_mint,
+            &ctx.accounts.coin_transfer_hook_program,
+            amount_out,
+            Some(pool_signer),
+        )?;
     }
+
+    Ok(())
+}
+
+fn transfer_tokens_with_hook_support(
+    token_program: &Interface<TokenInterface>,
+    from: &InterfaceAccount<TokenInterfaceAccount>,
+    to: &InterfaceAccount<TokenInterfaceAccount>,
+    authority: &AccountInfo,
+    mint: &InterfaceAccount<Mint>,
+    transfer_hook_program: &Option<UncheckedAccount>,
+    amount: u64,
+    signer_seeds: Option<&[&[&[u8]]]>,
+) -> Result<()> {
+    use anchor_spl::token_interface;
+
+    let transfer_ctx = if let Some(seeds) = signer_seeds {
+        CpiContext::new_with_signer(
+            token_program.to_account_info(),
+            token_interface::Transfer {
+                from: from.to_account_info(),
+                to: to.to_account_info(),
+                authority: authority.clone(),
+            },
+            seeds,
+        )
+    } else {
+        CpiContext::new(
+            token_program.to_account_info(),
+            token_interface::Transfer {
+                from: from.to_account_info(),
+                to: to.to_account_info(),
+                authority: authority.clone(),
+            },
+        )
+    };
+
+    // For Token-2022 with transfer hooks, additional accounts may be needed
+    // This is a simplified implementation - full implementation would require
+    // passing additional accounts required by the specific transfer hook
+    token_interface::transfer(transfer_ctx, amount)?;
 
     Ok(())
 }
