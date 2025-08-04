@@ -1,292 +1,122 @@
-use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Burn, Mint, Token, TokenAccount, Transfer};
-use anchor_spl::token_2022::{self, Token2022};
-use anchor_spl::token_interface::{
-    Mint as MintInterface, TokenAccount as TokenAccountInterface, TokenInterface,
-};
-use spl_token_2022::extension::transfer_hook::TransferHook;
-use spl_token_2022::extension::{BaseStateWithExtensions, ExtensionType, StateWithExtensions};
-
+use crate::constants::*;
 use crate::error::TradiumError;
-use crate::shared;
 use crate::state::*;
+use anchor_lang::prelude::*;
+use anchor_spl::token::{Mint, Token, TokenAccount};
 
 #[derive(Accounts)]
-pub struct Withdraw<'info> {
-    /// The pool (Tradium) account
+#[instruction(bump: u8)]
+pub struct InitializePool<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
     #[account(
-        mut,
-        seeds = [
-            b"tradium",
-            coin_vault_mint.key().as_ref(),
-            pc_vault_mint.key().as_ref()
-        ],
+        init,
+        payer = payer,
+        space = 8 + std::mem::size_of::<Tradium>(),
+        seeds = [POOL_SEED, coin_mint.key().as_ref(), pc_mint.key().as_ref()],
         bump
     )]
     pub pool: Account<'info, Tradium>,
 
-    /// User authority
-    pub user_authority: Signer<'info>,
+    pub coin_mint: Account<'info, Mint>,
+    pub pc_mint: Account<'info, Mint>,
 
-    /// User's LP token account
     #[account(
-        mut,
-        associated_token::mint = lp_mint,
-        associated_token::authority = user_authority
+        init,
+        payer = payer,
+        seeds = [LP_MINT_SEED, pool.key().as_ref()],
+        bump,
+        mint::decimals = 6,
+        mint::authority = pool,
     )]
-    pub user_lp_account: InterfaceAccount<'info, TokenAccountInterface>,
+    pub lp_mint: Account<'info, Mint>,
 
-    /// User's coin token account
     #[account(
-        mut,
-        token::mint = coin_vault_mint,
-        token::authority = user_authority
+        init,
+        payer = payer,
+        seeds = [VAULT_SEED, pool.key().as_ref(), coin_mint.key().as_ref()],
+        bump,
+        token::mint = coin_mint,
+        token::authority = pool,
     )]
-    pub user_coin_account: InterfaceAccount<'info, TokenAccountInterface>,
+    pub coin_vault: Account<'info, TokenAccount>,
 
-    /// User's PC token account
     #[account(
-        mut,
-        token::mint = pc_vault_mint,
-        token::authority = user_authority
+        init,
+        payer = payer,
+        seeds = [VAULT_SEED, pool.key().as_ref(), pc_mint.key().as_ref()],
+        bump,
+        token::mint = pc_mint,
+        token::authority = pool,
     )]
-    pub user_pc_account: InterfaceAccount<'info, TokenAccountInterface>,
+    pub pc_vault: Account<'info, TokenAccount>,
 
-    /// Pool's coin vault
-    #[account(
-        mut,
-        address = pool.coin_vault
-    )]
-    pub coin_vault: InterfaceAccount<'info, TokenAccountInterface>,
+    /// CHECK: This account will be validated in the instruction handler
+    pub coin_token_program: UncheckedAccount<'info>,
 
-    /// Pool's PC vault
-    #[account(
-        mut,
-        address = pool.pc_vault
-    )]
-    pub pc_vault: InterfaceAccount<'info, TokenAccountInterface>,
+    /// CHECK: This account will be validated in the instruction handler
+    pub pc_token_program: UncheckedAccount<'info>,
 
-    /// Coin mint
-    #[account(address = pool.coin_vault_mint)]
-    pub coin_vault_mint: InterfaceAccount<'info, MintInterface>,
-
-    /// PC mint
-    #[account(address = pool.pc_vault_mint)]
-    pub pc_vault_mint: InterfaceAccount<'info, MintInterface>,
-
-    /// LP mint
-    #[account(
-        mut,
-        address = pool.lp_mint
-    )]
-    pub lp_mint: InterfaceAccount<'info, MintInterface>,
-
-    /// LP token program (Token or Token2022)
-    pub lp_token_program_id: Interface<'info, TokenInterface>,
-
-    /// Coin token program (Token or Token2022)
-    pub coin_token_program_id: Interface<'info, TokenInterface>,
-
-    /// PC token program (Token or Token2022)
-    pub pc_token_program_id: Interface<'info, TokenInterface>,
-
-    /// CHECK: Optional, only required if coin_mint has a transfer hook
-    #[account(
-        constraint = validate_transfer_hook_program(
-            &coin_vault_mint,
-            &coin_transfer_hook_program.to_account_info(),
-            &pool.whitelisted_transfer_hooks,
-            pool.num_whitelisted_hooks
-        ) @ TradiumError::InvalidTransferHookProgram
-    )]
-    pub coin_transfer_hook_program: Option<UncheckedAccount<'info>>,
-
-    /// CHECK: Optional, only required if pc_mint has a transfer hook
-    #[account(
-        constraint = validate_transfer_hook_program(
-            &pc_vault_mint,
-            &pc_transfer_hook_program.to_account_info(),
-            &pool.whitelisted_transfer_hooks,
-            pool.num_whitelisted_hooks
-        ) @ TradiumError::InvalidTransferHookProgram
-    )]
-    pub pc_transfer_hook_program: Option<UncheckedAccount<'info>>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
 }
 
-pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
-    // Validate minimum withdrawal amount
-    require!(lp_amount > 0, TradiumError::InvalidAmount);
+pub fn initialize_pool(
+    ctx: Context<InitializePool>,
+    bump: u8,
+    initial_coin_amount: u64,
+    initial_pc_amount: u64,
+) -> Result<()> {
+    let pool = &mut ctx.accounts.pool;
+    let coin_program_id = ctx.accounts.coin_token_program.key();
+    // Validate token programs
+    let coin_program_id = ctx.accounts.coin_token_program.key();
+    let pc_program_id = ctx.accounts.pc_token_program.key();
 
-    // Validate user has sufficient LP tokens
-    require!(
-        ctx.accounts.user_lp_account.amount >= lp_amount,
-        TradiumError::InsufficientBalance
-    );
+    // Check if the provided token programs are valid
+    if coin_program_id != SPL_TOKEN_PROGRAM_ID && coin_program_id != SPL_TOKEN_2022_PROGRAM_ID {
+        return Err(TradiumError::InvalidTokenProgram.into());
+    }
+    if pc_program_id != SPL_TOKEN_PROGRAM_ID && pc_program_id != SPL_TOKEN_2022_PROGRAM_ID {
+        return Err(TradiumError::InvalidTokenProgram.into());
+    }
+    // Initialize the pool state
+    pool.status = 1; // Active
+    pool.nonce = bump;
+    pool.coin_decimals = ctx.accounts.coin_mint.decimals as u64;
+    pool.pc_decimals = ctx.accounts.pc_mint.decimals as u64;
 
-    // Validate token program IDs match pool configuration
-    require!(
-        ctx.accounts.coin_token_program_id.key() == ctx.accounts.pool.coin_token_program,
-        TradiumError::InvalidCoinTokenProgram
-    );
-    require!(
-        ctx.accounts.pc_token_program_id.key() == ctx.accounts.pool.pc_token_program,
-        TradiumError::InvalidPcTokenProgram
-    );
+    //set mint and vault addresses
+    pool.coin_vault_mint = ctx.accounts.coin_mint.key();
+    pool.pc_vault_mint = ctx.accounts.pc_mint.key();
+    pool.lp_mint = ctx.accounts.lp_mint.key();
+    pool.coin_vault = ctx.accounts.coin_vault.key();
+    pool.pc_vault = ctx.accounts.pc_vault.key();
 
-    // Get current vault balances
-    let coin_vault_balance = ctx.accounts.coin_vault.amount;
-    let pc_vault_balance = ctx.accounts.pc_vault.amount;
-    let total_lp_supply = ctx.accounts.lp_mint.supply;
+    //set the program IDs
+    pool.coin_token_program = coin_program_id;
+    pool.pc_token_program = pc_program_id;
+    pool.pc_token_program = ctx.accounts.token_program.key();
 
-    require!(total_lp_supply > 0, TradiumError::EmptyPool);
+    //Initialize fee with default values
+    pool.fees.trade_fee_numerator = DEFAULT_TRADE_FEE;
+    pool.fees.trade_fee_denominator = FEE_DENOMINATOR;
+    pool.fees.swap_fee_numerator = DEFAULT_OWNER_FEE;
+    pool.fees.swap_fee_denominator = FEE_DENOMINATOR;
 
-    // Calculate withdrawal amounts proportionally
-    let coin_amount = (coin_vault_balance as u128)
-        .checked_mul(lp_amount as u128)
-        .ok_or(TradiumError::MathOverflow)?
-        .checked_div(total_lp_supply as u128)
-        .ok_or(TradiumError::MathOverflow)? as u64;
+    // Initialize whitelisted transfer hooks (empty by default)
+    pool.whitelisted_transfer_hooks = [Pubkey::default(); crate::constants::MAX_WHITELISTED_HOOKS];
+    pool.num_whitelisted_hooks = 0;
 
-    let pc_amount = (pc_vault_balance as u128)
-        .checked_mul(lp_amount as u128)
-        .ok_or(TradiumError::MathOverflow)?
-        .checked_div(total_lp_supply as u128)
-        .ok_or(TradiumError::MathOverflow)? as u64;
+    //set initialization flag
+    pool.state_data.initialized = true;
 
-    // Validate minimum withdrawal amounts
-    require!(coin_amount > 0, TradiumError::InsufficientWithdrawal);
-    require!(pc_amount > 0, TradiumError::InsufficientWithdrawal);
-
-    // Burn LP tokens from user
-    let burn_ctx = CpiContext::new(
-        ctx.accounts.lp_token_program_id.to_account_info(),
-        Burn {
-            mint: ctx.accounts.lp_mint.to_account_info(),
-            from: ctx.accounts.user_lp_account.to_account_info(),
-            authority: ctx.accounts.user_authority.to_account_info(),
-        },
-    );
-    token::burn(burn_ctx, lp_amount)?;
-    // tradium/src/instructions/withdraw.rs
-    // ... (inside the withdraw function)
-
-    // Get pool account info before transfers to avoid borrow conflicts
-    let pool_account_info = ctx.accounts.pool.to_account_info();
-
-    // Obtain Pubkey references directly from the AccountInfo objects.
-    // These references will have the same lifetime as the context ('info or '1).
-    let coin_mint_key_ref: &[u8] = ctx.accounts.coin_vault_mint.to_account_info().key.as_ref();
-    let pc_mint_key_ref: &[u8] = ctx.accounts.pc_vault_mint.to_account_info().key.as_ref();
-
-    // Directly reference the bump from the pool account.
-    // Since pool.nonce is now u8, &[ctx.accounts.pool.nonce] creates a &[u8]
-    // that lives as long as ctx.accounts.pool, which is the '1 lifetime.
-    let bump_seed_ref: &[u8] = &[ctx.accounts.pool.nonce];
-
-    // Construct the PDA seeds array. All components now have the correct lifetimes.
-    let pda_seeds_array: &[&[u8]] = &[
-        b"tradium",        // Static slice, lives forever
-        coin_mint_key_ref, // &'info [u8; 32] (correct lifetime)
-        pc_mint_key_ref,   // &'info [u8; 32] (correct lifetime)
-        bump_seed_ref,     // &'1 [u8; 1] (correct lifetime)
-    ];
-
-    // Create the final signer_seeds structure.
-    // This is a reference to a stack-allocated array that contains the reference to our `pda_seeds_array`.
-    let final_signer_seeds: &[&[&[u8]]] = &[pda_seeds_array];
-
-    // Transfer coin tokens from vault to user with hook support
-    shared::transfer_tokens_with_hook_support(
-        &ctx.accounts.coin_token_program_id,
-        &ctx.accounts.coin_vault,
-        &ctx.accounts.user_coin_account,
-        &pool_account_info,
-        &ctx.accounts.coin_vault_mint,
-        ctx.accounts.coin_transfer_hook_program.as_ref(),
-        coin_amount,
-        Some(final_signer_seeds),
-    )?;
-
-    // Transfer PC tokens from vault to user with hook support
-    shared::transfer_tokens_with_hook_support(
-        &ctx.accounts.pc_token_program_id,
-        &ctx.accounts.pc_vault,
-        &ctx.accounts.user_pc_account,
-        &pool_account_info,
-        &ctx.accounts.pc_vault_mint,
-        ctx.accounts.pc_transfer_hook_program.as_ref(),
-        pc_amount,
-        Some(final_signer_seeds),
-    )?;
-
-    // ... (rest of the withdraw function)
-
-    msg!(
-        "Withdrawal completed: LP burned: {}, Coin withdrawn: {}, PC withdrawn: {}",
-        lp_amount,
-        coin_amount,
-        pc_amount
-    );
+    msg!("Pool initialized successfully");
+    msg!("Coin mint: {}", ctx.accounts.coin_mint.key());
+    msg!("PC mint: {}", ctx.accounts.pc_mint.key());
+    msg!("LP mint: {}", ctx.accounts.lp_mint.key());
 
     Ok(())
-}
-
-fn validate_transfer_hook_program<'a>(
-    mint: &InterfaceAccount<MintInterface>,
-    transfer_hook_program: &'a AccountInfo<'a>,
-    whitelisted_hooks: &[Pubkey],
-    num_whitelisted: u8,
-) -> bool {
-    // Check if mint has transfer hook extension
-    let mint_info = mint.to_account_info();
-    let mint_data = mint_info.data.borrow();
-
-    // For Token-2022 mints, check for transfer hook extension
-    if mint_info.owner == &spl_token_2022::ID {
-        match StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_data) {
-            Ok(mint_with_extensions) => {
-                if let Ok(transfer_hook_account) =
-                    mint_with_extensions.get_extension::<TransferHook>()
-                {
-                    // Mint has transfer hook - validate the provided program
-                    let hook_program_id =
-                        if let Some(pubkey) = transfer_hook_account.program_id.into() {
-                            pubkey
-                        } else {
-                            return false;
-                        };
-
-                    // Check if the hook program matches the mint's hook
-                    if transfer_hook_program.key() != hook_program_id {
-                        return false;
-                    }
-
-                    // Check if the hook program is whitelisted
-                    for i in 0..(num_whitelisted as usize) {
-                        if whitelisted_hooks[i] == hook_program_id {
-                            return true;
-                        }
-                    }
-                    return false; // Hook program not whitelisted
-                } else {
-                    // Mint doesn't have transfer hook but program was provided - invalid
-                    return false;
-                }
-            }
-            Err(_) => return false,
-        }
-    } else {
-        // Regular SPL token but transfer hook program was provided - invalid
-        return false;
-    }
-}
-
-#[event]
-pub struct WithdrawalEvent {
-    pub pool: Pubkey,
-    pub user: Pubkey,
-    pub lp_amount: u64,
-    pub coin_amount: u64,
-    pub pc_amount: u64,
-    pub timestamp: i64,
 }
