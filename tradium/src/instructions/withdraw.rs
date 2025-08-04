@@ -182,19 +182,6 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
     // This reference will have the same lifetime as ctx.accounts.pool, which is '1.
     let bump_seed_ref: &[u8] = &ctx.accounts.pool.nonce;
 
-    // Construct the PDA seeds array. All components now have the correct lifetimes.
-    let pda_seeds_array: &[&[u8]] = &[
-        b"tradium",        // Static slice, lives forever
-        coin_mint_key_ref, // &'info [u8; 32] (correct lifetime)
-        pc_mint_key_ref,   // &'info [u8; 32] (correct lifetime)
-        bump_seed_ref,     // &'1 [u8; 1] (correct lifetime)
-    ];
-
-    // Create the final signer_seeds structure.
-    // This is a reference to a stack-allocated array that contains the reference to our `pda_seeds_array`.
-    // This temporary array will be dropped at the end of the statement, but the CPI will have used the reference.
-    let final_signer_seeds: &[&[&[u8]]] = &[pda_seeds_array];
-
     // Transfer coin tokens from vault to user with hook support
     shared::transfer_tokens_with_hook_support(
         &ctx.accounts.coin_token_program_id,
@@ -204,7 +191,15 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
         &ctx.accounts.coin_vault_mint,
         ctx.accounts.coin_transfer_hook_program.as_ref(),
         coin_amount,
-        Some(final_signer_seeds),
+        Some(&[
+            // Directly construct the &[&[&[u8]]] here
+            &[
+                b"tradium",        // Static slice
+                coin_mint_key_ref, // &'info [u8; 32]
+                pc_mint_key_ref,   // &'info [u8; 32]
+                bump_seed_ref,     // &'1 [u8; 1]
+            ],
+        ]),
     )?;
 
     // Transfer PC tokens from vault to user with hook support
@@ -216,12 +211,16 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
         &ctx.accounts.pc_vault_mint,
         ctx.accounts.pc_transfer_hook_program.as_ref(),
         pc_amount,
-        Some(final_signer_seeds),
+        Some(&[
+            // Directly construct the &[&[&[u8]]] here
+            &[
+                b"tradium",        // Static slice
+                coin_mint_key_ref, // &'info [u8; 32]
+                pc_mint_key_ref,   // &'info [u8; 32]
+                bump_seed_ref,     // &'1 [u8; 1]
+            ],
+        ]),
     )?;
-
-    // ... (rest of the withdraw function)
-
-    // ... (rest of the withdraw function)
 
     msg!(
         "Withdrawal completed: LP burned: {}, Coin withdrawn: {}, PC withdrawn: {}",
