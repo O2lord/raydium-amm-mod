@@ -84,7 +84,7 @@ pub fn initialize_pool(
     }
     // Initialize the pool state
     pool.status = 1; // Active
-    pool.nonce = bump;
+    pool.nonce = bump as u64;
     pool.coin_decimals = ctx.accounts.coin_mint.decimals as u64;
     pool.pc_decimals = ctx.accounts.pc_mint.decimals as u64;
 
@@ -98,21 +98,20 @@ pub fn initialize_pool(
     //set the program IDs
     pool.coin_token_program = coin_program_id;
     pool.pc_token_program = pc_program_id;
-    pool.lp_token_program = ctx.accounts.token_program.key();
+    pool.pc_token_program = ctx.accounts.token_program.key();
 
     //Initialize fee with default values
-    pool.fees.trade_fee = DEFAULT_TRADE_FEE;
+    pool.fees.trade_fee_numerator = DEFAULT_TRADE_FEE;
     pool.fees.trade_fee_denominator = FEE_DENOMINATOR;
     pool.fees.swap_fee_numerator = DEFAULT_OWNER_FEE;
     pool.fees.swap_fee_denominator = FEE_DENOMINATOR;
 
     // Initialize whitelisted transfer hooks (empty by default)
-    pool.whitelisted_transfer_hooks = [Pubkey::default(); MAX_WHITELISTED_HOOKS];
-    pool.hook_count = 0;
+    pool.whitelisted_transfer_hooks = [Pubkey::default(); crate::constants::MAX_WHITELISTED_HOOKS];
+    pool.num_whitelisted_hooks = 0;
 
     //set initialization flag
-    pool.is_initialized = true;
-    pool.bump = bump;
+    pool.state_data.initialized = true;
 
     msg!("Pool initialized successfully");
     msg!("Coin mint: {}", ctx.accounts.coin_mint.key());
