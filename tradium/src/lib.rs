@@ -9,6 +9,8 @@ use crate::error::TradiumError;
 pub mod instructions;
 pub use instructions::*;
 
+use crate::shared;
+
 pub mod state;
 pub use state::*;
 
@@ -26,12 +28,15 @@ pub mod tradium {
     ) -> Result<()> {
         instructions::initialize_pool(ctx, bump, initial_coin_amount, initial_pc_amount)
     }
+
     pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Result<()> {
         instructions::deposit(ctx, amount_coin, amount_pc)
     }
+
     pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
         instructions::withdraw(ctx, lp_amount)
     }
+
     pub fn swap(
         ctx: Context<Swap>,
         amount_in: u64,
