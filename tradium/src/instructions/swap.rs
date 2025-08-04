@@ -135,8 +135,7 @@ pub fn swap(
     execute_swap_transfers(&ctx, amount_in, amount_out, swap_direction)?;
 
     // Update pool state
-    pool.nonce = pool
-        .nonce
+    pool.nonce[0] = pool.nonce[0]
         .checked_add(1)
         .ok_or(TradiumError::MathOverflow)?;
 
