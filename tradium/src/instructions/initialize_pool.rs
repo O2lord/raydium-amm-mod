@@ -84,7 +84,7 @@ pub fn initialize_pool(
     }
     // Initialize the pool state
     pool.status = 1; // Active
-    pool.nonce = bump;
+    pool.nonce = [bump];
     pool.coin_decimals = ctx.accounts.coin_mint.decimals as u64;
     pool.pc_decimals = ctx.accounts.pc_mint.decimals as u64;
 
