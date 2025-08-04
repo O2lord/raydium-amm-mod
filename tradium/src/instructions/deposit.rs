@@ -151,7 +151,7 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
     require!(lp_amount > 0, TradiumError::InsufficientLiquidityMinted);
 
     // Create mint authority seeds for PDA signing
-    let mint_authority_bump = pool.nonce as u8;
+    let mint_authority_bump = pool.nonce[0];
     let pool_key = pool.key();
     let mint_authority_seeds = &[b"mint_authority", pool_key.as_ref(), &[mint_authority_bump]];
     let signer_seeds = &[mint_authority_seeds.as_slice()];
@@ -176,8 +176,7 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
         .ok_or(TradiumError::MathOverflow)?;
 
     // Update nonce for security
-    pool.nonce = pool
-        .nonce
+    pool.nonce[0] = pool.nonce[0]
         .checked_add(1)
         .ok_or(TradiumError::MathOverflow)?;
 
