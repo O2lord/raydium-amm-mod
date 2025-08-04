@@ -1,4 +1,5 @@
-use crate::errors::TradiumError;
+use crate::error::TradiumError;
+use crate::shared;
 use crate::state::Tradium;
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, MintTo, Token, TokenAccount, Transfer};
@@ -6,7 +7,7 @@ use anchor_spl::token_interface::{
     Mint as MintInterface, TokenAccount as TokenAccountInterface, TokenInterface,
 };
 use spl_token_2022::extension::transfer_hook::TransferHook;
-use spl_token_2022::extension::{ExtensionType, StateWithExtensions};
+use spl_token_2022::extension::{BaseStateWithExtensions, ExtensionType, StateWithExtensions};
 
 #[derive(Accounts)]
 pub struct Deposit<'info> {
@@ -44,7 +45,7 @@ pub struct Deposit<'info> {
     #[account(
         constraint = validate_transfer_hook_program(
             &coin_mint,
-            &coin_transfer_hook_program,
+            &coin_transfer_hook_program.to_account_info(),
             &pool.whitelisted_transfer_hooks,
             pool.num_whitelisted_hooks
         ) @ TradiumError::InvalidTransferHookProgram
@@ -55,7 +56,7 @@ pub struct Deposit<'info> {
     #[account(
         constraint = validate_transfer_hook_program(
             &pc_mint,
-            &pc_transfer_hook_program,
+            &pc_transfer_hook_program.to_account_info(),
             &pool.whitelisted_transfer_hooks,
             pool.num_whitelisted_hooks
         ) @ TradiumError::InvalidTransferHookProgram
@@ -111,27 +112,29 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
 
     // Transfer coin tokens from user to vault if amount > 0
     if amount_coin > 0 {
-        transfer_tokens_with_hook_support(
+        shared::transfer_tokens_with_hook_support(
             &ctx.accounts.coin_token_program,
             &ctx.accounts.user_coin_account,
             &ctx.accounts.coin_vault,
-            &ctx.accounts.user,
+            &ctx.accounts.user.to_account_info(),
             &ctx.accounts.coin_mint,
-            &ctx.accounts.coin_transfer_hook_program,
+            ctx.accounts.coin_transfer_hook_program.as_ref(),
             amount_coin,
+            None,
         )?;
     }
 
     // Transfer PC tokens from user to vault if amount > 0
     if amount_pc > 0 {
-        transfer_tokens_with_hook_support(
+        shared::transfer_tokens_with_hook_support(
             &ctx.accounts.pc_token_program,
             &ctx.accounts.user_pc_account,
             &ctx.accounts.pc_vault,
-            &ctx.accounts.user,
+            &ctx.accounts.user.to_account_info(),
             &ctx.accounts.pc_mint,
-            &ctx.accounts.pc_transfer_hook_program,
+            ctx.accounts.pc_transfer_hook_program.as_ref(),
             amount_pc,
+            None,
         )?;
     }
 
@@ -149,11 +152,8 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
 
     // Create mint authority seeds for PDA signing
     let mint_authority_bump = pool.nonce as u8;
-    let mint_authority_seeds = &[
-        b"mint_authority",
-        pool.key().as_ref(),
-        &[mint_authority_bump],
-    ];
+    let pool_key = pool.key();
+    let mint_authority_seeds = &[b"mint_authority", pool_key.as_ref(), &[mint_authority_bump]];
     let signer_seeds = &[mint_authority_seeds.as_slice()];
 
     // Mint LP tokens to user
@@ -193,7 +193,7 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
 
 fn validate_transfer_hook_program(
     mint: &InterfaceAccount<MintInterface>,
-    transfer_hook_program: &Option<UncheckedAccount>,
+    transfer_hook_program: &AccountInfo,
     whitelisted_hooks: &[Pubkey],
     num_whitelisted: u8,
 ) -> bool {
@@ -209,87 +209,36 @@ fn validate_transfer_hook_program(
                     mint_with_extensions.get_extension::<TransferHook>()
                 {
                     // Mint has transfer hook - validate the provided program
-                    if let Some(hook_program) = transfer_hook_program {
-                        let hook_program_id = transfer_hook_account.program_id;
-
-                        // Check if the hook program matches the mint's hook
-                        if hook_program.key() != hook_program_id {
+                    let hook_program_id =
+                        if let Some(pubkey) = transfer_hook_account.program_id.into() {
+                            pubkey
+                        } else {
                             return false;
-                        }
+                        };
 
-                        // Check if the hook program is whitelisted
-                        for i in 0..(num_whitelisted as usize) {
-                            if whitelisted_hooks[i] == hook_program_id {
-                                return true;
-                            }
-                        }
-                        return false; // Hook program not whitelisted
-                    } else {
-                        return false; // Mint has hook but no program provided
+                    // Check if the hook program matches the mint's hook
+                    if transfer_hook_program.key() != hook_program_id {
+                        return false;
                     }
+
+                    // Check if the hook program is whitelisted
+                    for i in 0..(num_whitelisted as usize) {
+                        if whitelisted_hooks[i] == hook_program_id {
+                            return true;
+                        }
+                    }
+                    return false; // Hook program not whitelisted
                 } else {
-                    // Mint doesn't have transfer hook - shouldn't provide hook program
-                    return transfer_hook_program.is_none();
+                    // Mint doesn't have transfer hook but program was provided - invalid
+                    return false;
                 }
             }
             Err(_) => return false,
         }
     } else {
-        // Regular SPL token - shouldn't have transfer hook program
-        return transfer_hook_program.is_none();
+        // Regular SPL token but program was provided - invalid
+        return false;
     }
-}
-
-fn transfer_tokens_with_hook_support(
-    token_program: &Interface<TokenInterface>,
-    from: &InterfaceAccount<TokenAccountInterface>,
-    to: &InterfaceAccount<TokenAccountInterface>,
-    authority: &Signer,
-    mint: &InterfaceAccount<MintInterface>,
-    transfer_hook_program: &Option<UncheckedAccount>,
-    amount: u64,
-) -> Result<()> {
-    use anchor_spl::token_interface;
-    use spl_token_2022::extension::{ExtensionType, StateWithExtensions};
-    use spl_token_2022::extension::transfer_hook::TransferHook;
-
-    let mut remaining_accounts: Vec<AccountInfo> = Vec::new();
-
-    // Check if the mint is a Token-2022 mint and has a TransferHook extension
-    let mint_info = mint.to_account_info();
-    if mint_info.owner == &spl_token_2022::ID {
-        if let Ok(mint_data_with_extensions) = StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_info.data.borrow()) {
-            if let Ok(transfer_hook_extension) = mint_data_with_extensions.get_extension::<TransferHook>() {
-                // If the mint has a transfer hook, ensure the hook program account is provided
-                if let Some(hook_program_acc) = transfer_hook_program {
-                    remaining_accounts.push(hook_program_acc.to_account_info());
-                    // NOTE: If the specific transfer hook requires *other* accounts,
-                    // they would also need to be added to `remaining_accounts` here.
-                    // For a generic AMM, this is a common point of customization.
-                } else {
-                    // This case should ideally be caught by the `validate_transfer_hook_program` constraint
-                    // but it's good to be explicit.
-                    return Err(TradiumError::MissingTransferHookProgram.into());
-                }
-            }
-        }
-    }
-
-    let transfer_ctx = CpiContext::new(
-        token_program.to_account_info(),
-        token_interface::Transfer {
-            from: from.to_account_info(),
-            to: to.to_account_info(),
-            authority: authority.to_account_info(),
-        },
-    );
-
-    // Add remaining_accounts to the CPI context
-    let transfer_ctx = transfer_ctx.with_remaining_accounts(remaining_accounts);
-
-    token_interface::transfer(transfer_ctx, amount)?;
-
-    Ok(())
 }
 
 fn calculate_lp_tokens(
