@@ -1,9 +1,11 @@
-pub mod initialize_pool;
 pub mod deposit;
-pub mod withdraw;
+pub mod initialize_pool;
+pub mod shared;
 pub mod swap;
+pub mod withdraw;
 
-pub use initialize_pool::*;
 pub use deposit::*;
-pub use withdraw::*;
+pub use initialize_pool::*;
+pub use shared::*;
 pub use swap::*;
+pub use withdraw::*;
