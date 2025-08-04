@@ -1,11 +1,12 @@
 use crate::errors::TradiumError;
+use crate::shared;
 use crate::state::*;
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use anchor_spl::token_2022::{self, Token2022};
 use anchor_spl::token_interface::{Mint, TokenAccount as TokenInterfaceAccount, TokenInterface};
 use spl_token_2022::extension::transfer_hook::TransferHook;
-use spl_token_2022::extension::{ExtensionType, StateWithExtensions};
+use spl_token_2022::extension::{BaseStateWithExtensions, ExtensionType, StateWithExtensions};
 
 #[derive(Accounts)]
 pub struct Swap<'info> {
@@ -60,7 +61,7 @@ pub struct Swap<'info> {
     #[account(
         constraint = validate_transfer_hook_program(
             &coin_mint,
-            &coin_transfer_hook_program,
+            &coin_transfer_hook_program.to_account_info(),
             &pool.whitelisted_transfer_hooks,
             pool.num_whitelisted_hooks
         ) @ TradiumError::InvalidTransferHookProgram
@@ -71,7 +72,7 @@ pub struct Swap<'info> {
     #[account(
         constraint = validate_transfer_hook_program(
             &pc_mint,
-            &pc_transfer_hook_program,
+            &pc_transfer_hook_program.to_account_info(),
             &pool.whitelisted_transfer_hooks,
             pool.num_whitelisted_hooks
         ) @ TradiumError::InvalidTransferHookProgram
@@ -144,9 +145,9 @@ pub fn swap(
     Ok(())
 }
 
-fn validate_transfer_hook_program(
+fn validate_transfer_hook_program<'a>(
     mint: &InterfaceAccount<Mint>,
-    transfer_hook_program: &Option<UncheckedAccount>,
+    transfer_hook_program: &'a AccountInfo<'a>,
     whitelisted_hooks: &[Pubkey],
     num_whitelisted: u8,
 ) -> bool {
@@ -162,34 +163,35 @@ fn validate_transfer_hook_program(
                     mint_with_extensions.get_extension::<TransferHook>()
                 {
                     // Mint has transfer hook - validate the provided program
-                    if let Some(hook_program) = transfer_hook_program {
-                        let hook_program_id = transfer_hook_account.program_id;
-
-                        // Check if the hook program matches the mint's hook
-                        if hook_program.key() != hook_program_id {
+                    let hook_program_id =
+                        if let Some(pubkey) = transfer_hook_account.program_id.into() {
+                            pubkey
+                        } else {
                             return false;
-                        }
+                        };
 
-                        // Check if the hook program is whitelisted
-                        for i in 0..(num_whitelisted as usize) {
-                            if whitelisted_hooks[i] == hook_program_id {
-                                return true;
-                            }
-                        }
-                        return false; // Hook program not whitelisted
-                    } else {
-                        return false; // Mint has hook but no program provided
+                    // Check if the hook program matches the mint's hook
+                    if transfer_hook_program.key() != hook_program_id {
+                        return false;
                     }
+
+                    // Check if the hook program is whitelisted
+                    for i in 0..(num_whitelisted as usize) {
+                        if whitelisted_hooks[i] == hook_program_id {
+                            return true;
+                        }
+                    }
+                    return false; // Hook program not whitelisted
                 } else {
-                    // Mint doesn't have transfer hook - shouldn't provide hook program
-                    return transfer_hook_program.is_none();
+                    // Mint doesn't have transfer hook but program was provided - invalid
+                    return false;
                 }
             }
             Err(_) => return false,
         }
     } else {
-        // Regular SPL token - shouldn't have transfer hook program
-        return transfer_hook_program.is_none();
+        // Regular SPL token but transfer hook program was provided - invalid
+        return false;
     }
 }
 
@@ -296,25 +298,25 @@ fn execute_swap_transfers(
         // Coin to PC swap
 
         // Transfer input tokens (coin) from user to coin vault
-        transfer_tokens_with_hook_support(
+        shared::transfer_tokens_with_hook_support(
             &ctx.accounts.input_token_program,
             &ctx.accounts.user_input_token_account,
             &ctx.accounts.coin_vault,
             &ctx.accounts.user.to_account_info(),
             &ctx.accounts.coin_mint,
-            &ctx.accounts.coin_transfer_hook_program,
+            ctx.accounts.coin_transfer_hook_program.as_ref(),
             amount_in,
             None,
         )?;
 
         // Transfer output tokens (pc) from pc vault to user
-        transfer_tokens_with_hook_support(
+        shared::transfer_tokens_with_hook_support(
             &ctx.accounts.output_token_program,
             &ctx.accounts.pc_vault,
             &ctx.accounts.user_output_token_account,
             &ctx.accounts.pool.to_account_info(),
             &ctx.accounts.pc_mint,
-            &ctx.accounts.pc_transfer_hook_program,
+            ctx.accounts.pc_transfer_hook_program.as_ref(),
             amount_out,
             Some(pool_signer),
         )?;
@@ -322,94 +324,29 @@ fn execute_swap_transfers(
         // PC to Coin swap
 
         // Transfer input tokens (pc) from user to pc vault
-        transfer_tokens_with_hook_support(
+        shared::transfer_tokens_with_hook_support(
             &ctx.accounts.input_token_program,
             &ctx.accounts.user_input_token_account,
             &ctx.accounts.pc_vault,
             &ctx.accounts.user.to_account_info(),
             &ctx.accounts.pc_mint,
-            &ctx.accounts.pc_transfer_hook_program,
+            ctx.accounts.pc_transfer_hook_program.as_ref(),
             amount_in,
             None,
         )?;
 
         // Transfer output tokens (coin) from coin vault to user
-        transfer_tokens_with_hook_support(
+        shared::transfer_tokens_with_hook_support(
             &ctx.accounts.output_token_program,
             &ctx.accounts.coin_vault,
             &ctx.accounts.user_output_token_account,
             &ctx.accounts.pool.to_account_info(),
             &ctx.accounts.coin_mint,
-            &ctx.accounts.coin_transfer_hook_program,
+            ctx.accounts.coin_transfer_hook_program.as_ref(),
             amount_out,
             Some(pool_signer),
         )?;
     }
-
-    Ok(())
-}
-
-fn transfer_tokens_with_hook_support(
-    token_program: &Interface<TokenInterface>,
-    from: &InterfaceAccount<TokenInterfaceAccount>,
-    to: &InterfaceAccount<TokenInterfaceAccount>,
-    authority: &AccountInfo,
-    mint: &InterfaceAccount<Mint>,
-    transfer_hook_program: &Option<UncheckedAccount>,
-    amount: u64,
-    signer_seeds: Option<&[&[&[u8]]]>,
-) -> Result<()> {
-    use anchor_spl::token_interface;
-    use spl_token_2022::extension::{ExtensionType, StateWithExtensions};
-    use spl_token_2022::extension::transfer_hook::TransferHook;
-
-    let mut remaining_accounts: Vec<AccountInfo> = Vec::new();
-
-    // Check if the mint is a Token-2022 mint and has a TransferHook extension
-    let mint_info = mint.to_account_info();
-    if mint_info.owner == &spl_token_2022::ID {
-        if let Ok(mint_data_with_extensions) = StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_info.data.borrow()) {
-            if let Ok(transfer_hook_extension) = mint_data_with_extensions.get_extension::<TransferHook>() {
-                // If the mint has a transfer hook, ensure the hook program account is provided
-                if let Some(hook_program_acc) = transfer_hook_program {
-                    remaining_accounts.push(hook_program_acc.to_account_info());
-                    // NOTE: If the specific transfer hook requires *other* accounts,
-                    // they would also need to be added to `remaining_accounts` here.
-                    // For a generic AMM, this is a common point of customization.
-                } else {
-                    // This case should ideally be caught by the `validate_transfer_hook_program` constraint
-                    // but it's good to be explicit.
-                    return Err(TradiumError::MissingTransferHookProgram.into());
-                }
-            }
-        }
-    }
-
-    let transfer_ctx = if let Some(seeds) = signer_seeds {
-        CpiContext::new_with_signer(
-            token_program.to_account_info(),
-            token_interface::Transfer {
-                from: from.to_account_info(),
-                to: to.to_account_info(),
-                authority: authority.clone(),
-            },
-            seeds,
-        )
-    } else {
-        CpiContext::new(
-            token_program.to_account_info(),
-            token_interface::Transfer {
-                from: from.to_account_info(),
-                to: to.to_account_info(),
-                authority: authority.clone(),
-            },
-        )
-    };
-
-    // Add remaining_accounts to the CPI context
-    let transfer_ctx = transfer_ctx.with_remaining_accounts(remaining_accounts);
-
-    token_interface::transfer(transfer_ctx, amount)?;
 
     Ok(())
 }
