@@ -173,21 +173,21 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
     // Get pool account info before transfers to avoid borrow conflicts
     let pool_account_info = ctx.accounts.pool.to_account_info();
 
-    // Directly use references to the keys from the pool account.
-    // These keys are part of the `pool` account data, which lives for the duration of the instruction.
+    // Create signer seeds for PDA signing
     let coin_mint_key_bytes = ctx.accounts.pool.coin_vault_mint.key().as_ref();
     let pc_mint_key_bytes = ctx.accounts.pool.pc_vault_mint.key().as_ref();
-    let bump_seed = &[ctx.bumps.pool]; // This is a stack-allocated array, lives for the function
+    let bump_seed = &[ctx.bumps.pool];
 
-    // Construct the signer seeds slice.
-    // All components (b"tradium", coin_mint_key_bytes, pc_mint_key_bytes, bump_seed)
-    // live for the duration of the `withdraw` function.
-    let signer_seeds: &[&[u8]] = &[
+    // Construct the signer seeds array - this is a single seed array
+    let signer_seeds_array: &[&[u8]] = &[
         b"tradium",
         coin_mint_key_bytes,
         pc_mint_key_bytes,
         bump_seed,
     ];
+    
+    // Create the slice of seed arrays (required format for CpiContext::new_with_signer)
+    let signer_seeds: &[&[&[u8]]] = &[signer_seeds_array];
 
     // Transfer coin tokens from vault to user with hook support
     shared::transfer_tokens_with_hook_support(
@@ -198,7 +198,7 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
         &ctx.accounts.coin_vault_mint,
         ctx.accounts.coin_transfer_hook_program.as_ref(),
         coin_amount,
-        Some(&signer_seeds), // Pass a reference to the slice of slices
+        Some(signer_seeds),
     )?;
 
     // Transfer PC tokens from vault to user with hook support
@@ -210,7 +210,7 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
         &ctx.accounts.pc_vault_mint,
         ctx.accounts.pc_transfer_hook_program.as_ref(),
         pc_amount,
-        Some(&signer_seeds), // Use the same signer_seeds
+        Some(signer_seeds),
     )?;
 
     // ... (rest of the withdraw function)
