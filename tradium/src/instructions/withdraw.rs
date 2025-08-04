@@ -167,35 +167,39 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
         },
     );
     token::burn(burn_ctx, lp_amount)?;
+    // tradium/src/instructions/withdraw.rs
 
     // ... (inside the withdraw function)
 
+    // Get pool account info before transfers to avoid borrow conflicts
     let pool_account_info = ctx.accounts.pool.to_account_info();
 
-    // Store the owned Pubkey values first
-    let coin_mint_key = ctx.accounts.pool.coin_vault_mint.key();
-    let pc_mint_key = ctx.accounts.pool.pc_vault_mint.key();
+    // Obtain Pubkey references directly from the AccountInfo objects.
+    // These references will have the same lifetime as the context ('info or '1).
+    let coin_mint_key_ref: &[u8] = ctx.accounts.coin_vault_mint.to_account_info().key.as_ref();
+    let pc_mint_key_ref: &[u8] = ctx.accounts.pc_vault_mint.to_account_info().key.as_ref();
 
-    // Now take references to these owned Pubkey values
-    let coin_mint_key_bytes = coin_mint_key.as_ref();
-    let pc_mint_key_bytes = pc_mint_key.as_ref();
+    // Store the bump value.
+    let pool_bump_val = ctx.bumps.pool;
 
-    // Store the bump value in a variable that lives for the function's scope
-    let pool_bump = ctx.bumps.pool;
-    // Now, create a slice that refers to this local variable.
-    // This slice will also live for the function's scope.
-    let bump_seed = &[pool_bump];
+    // Heap-allocate the bump value to ensure it lives long enough for the CPI.
+    // This creates a Box<[u8]> which is then coerced to &[u8].
+    // The Box will be dropped at the end of the function, but the reference
+    // passed to the CPI will be valid for the CPI's duration.
+    let bump_seed_box: Box<[u8]> = Box::new([pool_bump_val]);
+    let bump_seed_ref: &[u8] = bump_seed_box.as_ref();
 
-    // Construct the signer seeds array. All components now live long enough.
-    let signer_seeds_array: &[&[u8]] = &[
-        b"tradium",
-        coin_mint_key_bytes,
-        pc_mint_key_bytes,
-        bump_seed,
+    // Construct the PDA seeds array. All components now have the correct lifetimes.
+    let pda_seeds_array: &[&[u8]] = &[
+        b"tradium",        // Static slice, lives forever
+        coin_mint_key_ref, // &'info [u8; 32] (correct lifetime)
+        pc_mint_key_ref,   // &'info [u8; 32] (correct lifetime)
+        bump_seed_ref, // &'a [u8] (where 'a is the lifetime of the Box, which is the function's scope)
     ];
 
-    // Create the slice of seed arrays (required format for CpiContext::new_with_signer)
-    let signer_seeds: &[&[&[u8]]] = &[signer_seeds_array];
+    // Create the final signer_seeds structure.
+    // This is a reference to a stack-allocated array that contains the reference to our `pda_seeds_array`.
+    let final_signer_seeds: &[&[&[u8]]] = &[pda_seeds_array];
 
     // Transfer coin tokens from vault to user with hook support
     shared::transfer_tokens_with_hook_support(
@@ -206,7 +210,7 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
         &ctx.accounts.coin_vault_mint,
         ctx.accounts.coin_transfer_hook_program.as_ref(),
         coin_amount,
-        Some(signer_seeds),
+        Some(final_signer_seeds),
     )?;
 
     // Transfer PC tokens from vault to user with hook support
@@ -218,30 +222,10 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
         &ctx.accounts.pc_vault_mint,
         ctx.accounts.pc_transfer_hook_program.as_ref(),
         pc_amount,
-        Some(signer_seeds),
+        Some(final_signer_seeds),
     )?;
 
     // ... (rest of the withdraw function)
-
-    // ... (rest of the withdraw function)
-
-    // Update pool state
-    ctx.accounts.pool.lp_amount = ctx
-        .accounts
-        .pool
-        .lp_amount
-        .checked_sub(lp_amount)
-        .ok_or(TradiumError::MathOverflow)?;
-
-    // Emit withdrawal event
-    emit!(WithdrawalEvent {
-        pool: ctx.accounts.pool.key(),
-        user: ctx.accounts.user_authority.key(),
-        lp_amount,
-        coin_amount,
-        pc_amount,
-        timestamp: Clock::get()?.unix_timestamp,
-    });
 
     msg!(
         "Withdrawal completed: LP burned: {}, Coin withdrawn: {}, PC withdrawn: {}",
