@@ -176,7 +176,9 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
     // Create signer seeds for PDA signing
     let coin_mint_key_bytes = ctx.accounts.pool.coin_vault_mint.key().as_ref();
     let pc_mint_key_bytes = ctx.accounts.pool.pc_vault_mint.key().as_ref();
-    let bump_seed = &[ctx.bumps.pool];
+    let pool_bump = ctx.accounts.pool;
+
+    let bump_seed = &[pool_bump];
 
     // Construct the signer seeds array - this is a single seed array
     let signer_seeds_array: &[&[u8]] = &[
@@ -185,7 +187,7 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
         pc_mint_key_bytes,
         bump_seed,
     ];
-    
+
     // Create the slice of seed arrays (required format for CpiContext::new_with_signer)
     let signer_seeds: &[&[&[u8]]] = &[signer_seeds_array];
 
