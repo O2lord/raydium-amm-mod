@@ -16,4 +16,4 @@ pub const FEE_DENOMINATOR: u64 = 10000; // For percentage calculations (0.01% = 
 
 // Default fees (in basis points)
 pub const DEFAULT_TRADE_FEE: u64 = 30; // 0.3%
-pub const DEFAULT_OWNER_FEE: u64 = 5;  // 0.05%
+pub const DEFAULT_OWNER_FEE: u64 = 5; // 0.05%
