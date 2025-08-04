@@ -170,17 +170,18 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
 
     // ... (inside the withdraw function)
 
-    // Get pool account info before transfers to avoid borrow conflicts
     let pool_account_info = ctx.accounts.pool.to_account_info();
 
-    // Create signer seeds for PDA signing
     let coin_mint_key_bytes = ctx.accounts.pool.coin_vault_mint.key().as_ref();
     let pc_mint_key_bytes = ctx.accounts.pool.pc_vault_mint.key().as_ref();
-    let pool_bump = ctx.accounts.pool;
 
+    // Store the bump value in a variable that lives for the function's scope
+    let pool_bump = ctx.bumps.pool;
+    // Now, create a slice that refers to this local variable.
+    // This slice will also live for the function's scope.
     let bump_seed = &[pool_bump];
 
-    // Construct the signer seeds array - this is a single seed array
+    // Construct the signer seeds array. All components now live long enough.
     let signer_seeds_array: &[&[u8]] = &[
         b"tradium",
         coin_mint_key_bytes,
