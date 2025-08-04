@@ -14,8 +14,14 @@ pub enum TradiumError {
     InsufficientLiquidity,
     #[msg("Slippage Tolerance Exceeded")]
     SlippageToleranceExceeded,
+    #[msg("Invalid Transfer Hook Account")]
+    InvalidTransferHookProgram,
     #[msg("Invalid Pool State")]
     InvalidPoolState,
+    #[msg("Invalid coin mint")]
+    InvalidCoinMint,
+    #[msg("Invalid PC mint")]
+    InvalidPcMint,
     #[msg("Unauthorized")]
     Unauthorized,
     #[msg("Math Overflow")]
