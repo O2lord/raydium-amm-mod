@@ -1,4 +1,5 @@
-use crate::errors::TradiumError;
+use crate::error::TradiumError;
+use crate::shared; // Import shared module
 use crate::shared;
 use crate::state::*;
 use anchor_lang::prelude::*;
@@ -59,7 +60,7 @@ pub struct Swap<'info> {
 
     /// CHECK: Optional, only required if coin_mint has a transfer hook
     #[account(
-        constraint = validate_transfer_hook_program(
+        constraint = shared::validate_transfer_hook_program(
             &coin_mint,
             &coin_transfer_hook_program.to_account_info(),
             &pool.whitelisted_transfer_hooks,
@@ -70,7 +71,7 @@ pub struct Swap<'info> {
 
     /// CHECK: Optional, only required if pc_mint has a transfer hook
     #[account(
-        constraint = validate_transfer_hook_program(
+        constraint = shared::validate_transfer_hook_program(
             &pc_mint,
             &pc_transfer_hook_program.to_account_info(),
             &pool.whitelisted_transfer_hooks,
@@ -135,7 +136,7 @@ pub fn swap(
     execute_swap_transfers(&ctx, amount_in, amount_out, swap_direction)?;
 
     // Update pool state
-    pool.nonce[0] = pool.nonce[0]
+    pool.nonce[0] = pool.nonce[0] // Access the u8 value inside the array
         .checked_add(1)
         .ok_or(TradiumError::MathOverflow)?;
 

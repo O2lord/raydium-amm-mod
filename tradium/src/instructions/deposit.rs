@@ -1,4 +1,5 @@
 use crate::error::TradiumError;
+use crate::shared; // Import shared module
 use crate::shared;
 use crate::state::Tradium;
 use anchor_lang::prelude::*;
@@ -43,7 +44,7 @@ pub struct Deposit<'info> {
 
     /// CHECK: Optional, only required if coin_mint has a transfer hook
     #[account(
-        constraint = validate_transfer_hook_program(
+        constraint = shared::validate_transfer_hook_program(
             &coin_mint,
             &coin_transfer_hook_program.to_account_info(),
             &pool.whitelisted_transfer_hooks,
@@ -54,7 +55,7 @@ pub struct Deposit<'info> {
 
     /// CHECK: Optional, only required if pc_mint has a transfer hook
     #[account(
-        constraint = validate_transfer_hook_program(
+        constraint = shared::validate_transfer_hook_program(
             &pc_mint,
             &pc_transfer_hook_program.to_account_info(),
             &pool.whitelisted_transfer_hooks,
@@ -151,10 +152,15 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
     require!(lp_amount > 0, TradiumError::InsufficientLiquidityMinted);
 
     // Create mint authority seeds for PDA signing
-    let mint_authority_bump = pool.nonce[0];
+    let mint_authority_bump = pool.nonce[0]; // Access the u8 value from the [u8; 1] array
     let pool_key = pool.key();
-    let mint_authority_seeds = &[b"mint_authority", pool_key.as_ref(), &[mint_authority_bump]];
-    let signer_seeds = &[mint_authority_seeds.as_slice()];
+    // The seeds themselves should be &[&[u8]]
+    let mint_authority_seeds = &[
+        b"mint_authority",
+        pool_key.as_ref(),
+        &[mint_authority_bump] // Create a temporary slice from the u8
+    ];
+    let signer_seeds = &[mint_authority_seeds]; // This is &[&[&[u8]]]
 
     // Mint LP tokens to user
     let mint_ctx = CpiContext::new_with_signer(
@@ -164,7 +170,7 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
             to: ctx.accounts.user_lp_account.to_account_info(),
             authority: pool.to_account_info(),
         },
-        signer_seeds,
+        signer_seeds, // Pass the correctly structured signer_seeds
     );
 
     token::mint_to(mint_ctx, lp_amount)?;
@@ -176,6 +182,7 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
         .ok_or(TradiumError::MathOverflow)?;
 
     // Update nonce for security
+    // Increment the u8 value inside the array
     pool.nonce[0] = pool.nonce[0]
         .checked_add(1)
         .ok_or(TradiumError::MathOverflow)?;

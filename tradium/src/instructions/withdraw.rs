@@ -1,6 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Burn, Mint, Token, TokenAccount, Transfer};
-use anchor_spl::token_2022::{self, Token2022};
+use anchor_spl::token::{self, Burn, Token, TokenAccount};
 use anchor_spl::token_interface::{
     Mint as MintInterface, TokenAccount as TokenAccountInterface, TokenInterface,
 };
@@ -92,7 +91,7 @@ pub struct Withdraw<'info> {
 
     /// CHECK: Optional, only required if coin_mint has a transfer hook
     #[account(
-        constraint = validate_transfer_hook_program(
+        constraint = shared::validate_transfer_hook_program(
             &coin_vault_mint,
             &coin_transfer_hook_program.to_account_info(),
             &pool.whitelisted_transfer_hooks,
@@ -103,7 +102,7 @@ pub struct Withdraw<'info> {
 
     /// CHECK: Optional, only required if pc_mint has a transfer hook
     #[account(
-        constraint = validate_transfer_hook_program(
+        constraint = shared::validate_transfer_hook_program(
             &pc_vault_mint,
             &pc_transfer_hook_program.to_account_info(),
             &pool.whitelisted_transfer_hooks,
@@ -167,60 +166,91 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
         },
     );
     token::burn(burn_ctx, lp_amount)?;
-    // tradium/src/instructions/withdraw.rs
-    // ... (inside the withdraw function)
 
     // Get pool account info before transfers to avoid borrow conflicts
     let pool_account_info = ctx.accounts.pool.to_account_info();
 
     // Obtain Pubkey references directly from the AccountInfo objects.
-    // These references will have the same lifetime as the context ('info or '1).
+    // These references will have the same lifetime as the context ('info).
     let coin_mint_key_ref: &[u8] = ctx.accounts.coin_vault_mint.to_account_info().key.as_ref();
     let pc_mint_key_ref: &[u8] = ctx.accounts.pc_vault_mint.to_account_info().key.as_ref();
 
     // Directly reference the nonce field, which is now a [u8; 1] array.
-    // This reference will have the same lifetime as ctx.accounts.pool, which is '1.
+    // This reference will have the same lifetime as ctx.accounts.pool.
     let bump_seed_ref: &[u8] = &ctx.accounts.pool.nonce;
 
-    // Transfer coin tokens from vault to user with hook support
-    shared::transfer_tokens_with_hook_support(
-        &ctx.accounts.coin_token_program_id,
-        &ctx.accounts.coin_vault,
-        &ctx.accounts.user_coin_account,
-        &pool_account_info,
-        &ctx.accounts.coin_vault_mint,
-        ctx.accounts.coin_transfer_hook_program.as_ref(),
-        coin_amount,
-        Some(&[
-            // Directly construct the &[&[&[u8]]] here
-            &[
-                b"tradium",        // Static slice
-                coin_mint_key_ref, // &'info [u8; 32]
-                pc_mint_key_ref,   // &'info [u8; 32]
-                bump_seed_ref,     // &'1 [u8; 1]
-            ],
-        ]),
-    )?;
+    // Define the common signer seeds for both transfers
+    let cpi_seeds = &[
+        &b"tradium"[..],
+        coin_mint_key_ref,
+        pc_mint_key_ref,
+        bump_seed_ref,
+    ];
+    let signer_seeds = &[&cpi_seeds[..]];
 
-    // Transfer PC tokens from vault to user with hook support
-    shared::transfer_tokens_with_hook_support(
-        &ctx.accounts.pc_token_program_id,
-        &ctx.accounts.pc_vault,
-        &ctx.accounts.user_pc_account,
-        &pool_account_info,
-        &ctx.accounts.pc_vault_mint,
-        ctx.accounts.pc_transfer_hook_program.as_ref(),
-        pc_amount,
-        Some(&[
-            // Directly construct the &[&[&[u8]]] here
-            &[
-                b"tradium",        // Static slice
-                coin_mint_key_ref, // &'info [u8; 32]
-                pc_mint_key_ref,   // &'info [u8; 32]
-                bump_seed_ref,     // &'1 [u8; 1]
-            ],
-        ]),
-    )?;
+    // --- Transfer coin tokens from vault to user with hook support ---
+    let mut remaining_accounts_coin: Vec<AccountInfo> = Vec::new();
+    if ctx.accounts.coin_vault_mint.to_account_info().owner == &spl_token_2022::ID {
+        if let Ok(mint_data_with_extensions) =
+            StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&ctx.accounts.coin_vault_mint.to_account_info().data.borrow())
+        {
+            if let Ok(_transfer_hook_extension) =
+                mint_data_with_extensions.get_extension::<TransferHook>()
+            {
+                if let Some(hook_program_acc) = ctx.accounts.coin_transfer_hook_program.as_ref() {
+                    remaining_accounts_coin.push(hook_program_acc.to_account_info());
+                } else {
+                    return Err(TradiumError::InvalidTransferHookProgram.into());
+                }
+            }
+        }
+    }
+
+    let transfer_accounts_coin = anchor_spl::token_interface::Transfer {
+        from: ctx.accounts.coin_vault.to_account_info(),
+        to: ctx.accounts.user_coin_account.to_account_info(),
+        authority: pool_account_info.clone(),
+    };
+
+    let transfer_ctx_coin = CpiContext::new_with_signer(
+        ctx.accounts.coin_token_program_id.to_account_info(),
+        transfer_accounts_coin,
+        signer_seeds,
+    ).with_remaining_accounts(remaining_accounts_coin);
+
+    anchor_spl::token_interface::transfer(transfer_ctx_coin, coin_amount)?;
+
+    // --- Transfer PC tokens from vault to user with hook support ---
+    let mut remaining_accounts_pc: Vec<AccountInfo> = Vec::new();
+    if ctx.accounts.pc_vault_mint.to_account_info().owner == &spl_token_2022::ID {
+        if let Ok(mint_data_with_extensions) =
+            StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&ctx.accounts.pc_vault_mint.to_account_info().data.borrow())
+        {
+            if let Ok(_transfer_hook_extension) =
+                mint_data_with_extensions.get_extension::<TransferHook>()
+            {
+                if let Some(hook_program_acc) = ctx.accounts.pc_transfer_hook_program.as_ref() {
+                    remaining_accounts_pc.push(hook_program_acc.to_account_info());
+                } else {
+                    return Err(TradiumError::InvalidTransferHookProgram.into());
+                }
+            }
+        }
+    }
+
+    let transfer_accounts_pc = anchor_spl::token_interface::Transfer {
+        from: ctx.accounts.pc_vault.to_account_info(),
+        to: ctx.accounts.user_pc_account.to_account_info(),
+        authority: pool_account_info,
+    };
+
+    let transfer_ctx_pc = CpiContext::new_with_signer(
+        ctx.accounts.pc_token_program_id.to_account_info(),
+        transfer_accounts_pc,
+        signer_seeds,
+    ).with_remaining_accounts(remaining_accounts_pc);
+
+    anchor_spl::token_interface::transfer(transfer_ctx_pc, pc_amount)?;
 
     msg!(
         "Withdrawal completed: LP burned: {}, Coin withdrawn: {}, PC withdrawn: {}",

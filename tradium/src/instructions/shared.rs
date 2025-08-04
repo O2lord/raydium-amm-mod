@@ -4,7 +4,6 @@ use anchor_spl::token_interface::{
     Mint as MintInterface, TokenAccount as TokenAccountInterface, TokenInterface,
 };
 use spl_token_2022::extension::transfer_hook::TransferHook;
-use spl_token_2022::extension::{BaseStateWithExtensions, ExtensionType, StateWithExtensions};
 
 pub fn transfer_tokens_with_hook_support<'a>(
     token_program: &Interface<'a, TokenInterface>,
