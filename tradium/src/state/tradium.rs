@@ -4,7 +4,7 @@ pub const MAX_ORDER_LIMIT: usize = 10;
 pub const MAX_WHITELISTED_HOOKS: usize = 10;
 
 #[account]
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Default, PartialEq)]
 pub struct Tradium {
     pub status: u64,
     pub nonce: u64,
@@ -47,7 +47,7 @@ pub struct Tradium {
     pub padding2: u64,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Default)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Default, PartialEq)]
 pub struct Fees {
     pub min_separate_numerator: u64,
     pub min_separate_denominator: u64,
@@ -59,7 +59,7 @@ pub struct Fees {
     pub swap_fee_denominator: u64,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default, PartialEq)]
 pub struct StateData {
     pub initialized: bool,
     pub nonce: u8,
