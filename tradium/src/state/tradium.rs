@@ -7,7 +7,7 @@ pub const MAX_WHITELISTED_HOOKS: usize = 10;
 #[derive(Default, PartialEq)]
 pub struct Tradium {
     pub status: u64,
-    pub nonce: u8,
+    pub nonce: [u8; 1],
     pub order_num: u64,
     pub depth: u64,
     pub coin_decimals: u64,
