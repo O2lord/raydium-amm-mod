@@ -172,8 +172,13 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
 
     let pool_account_info = ctx.accounts.pool.to_account_info();
 
-    let coin_mint_key_bytes = ctx.accounts.pool.coin_vault_mint.key().as_ref();
-    let pc_mint_key_bytes = ctx.accounts.pool.pc_vault_mint.key().as_ref();
+    // Store the owned Pubkey values first
+    let coin_mint_key = ctx.accounts.pool.coin_vault_mint.key();
+    let pc_mint_key = ctx.accounts.pool.pc_vault_mint.key();
+
+    // Now take references to these owned Pubkey values
+    let coin_mint_key_bytes = coin_mint_key.as_ref();
+    let pc_mint_key_bytes = pc_mint_key.as_ref();
 
     // Store the bump value in a variable that lives for the function's scope
     let pool_bump = ctx.bumps.pool;
@@ -215,6 +220,8 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
         pc_amount,
         Some(signer_seeds),
     )?;
+
+    // ... (rest of the withdraw function)
 
     // ... (rest of the withdraw function)
 
