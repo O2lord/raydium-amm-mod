@@ -168,7 +168,6 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
     );
     token::burn(burn_ctx, lp_amount)?;
     // tradium/src/instructions/withdraw.rs
-
     // ... (inside the withdraw function)
 
     // Get pool account info before transfers to avoid borrow conflicts
@@ -179,22 +178,17 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
     let coin_mint_key_ref: &[u8] = ctx.accounts.coin_vault_mint.to_account_info().key.as_ref();
     let pc_mint_key_ref: &[u8] = ctx.accounts.pc_vault_mint.to_account_info().key.as_ref();
 
-    // Store the bump value.
-    let pool_bump_val = ctx.bumps.pool;
-
-    // Heap-allocate the bump value to ensure it lives long enough for the CPI.
-    // This creates a Box<[u8]> which is then coerced to &[u8].
-    // The Box will be dropped at the end of the function, but the reference
-    // passed to the CPI will be valid for the CPI's duration.
-    let bump_seed_box: Box<[u8]> = Box::new([pool_bump_val]);
-    let bump_seed_ref: &[u8] = bump_seed_box.as_ref();
+    // Directly reference the bump from the pool account.
+    // Since pool.nonce is now u8, &[ctx.accounts.pool.nonce] creates a &[u8]
+    // that lives as long as ctx.accounts.pool, which is the '1 lifetime.
+    let bump_seed_ref: &[u8] = &[ctx.accounts.pool.nonce];
 
     // Construct the PDA seeds array. All components now have the correct lifetimes.
     let pda_seeds_array: &[&[u8]] = &[
         b"tradium",        // Static slice, lives forever
         coin_mint_key_ref, // &'info [u8; 32] (correct lifetime)
         pc_mint_key_ref,   // &'info [u8; 32] (correct lifetime)
-        bump_seed_ref, // &'a [u8] (where 'a is the lifetime of the Box, which is the function's scope)
+        bump_seed_ref,     // &'1 [u8; 1] (correct lifetime)
     ];
 
     // Create the final signer_seeds structure.
