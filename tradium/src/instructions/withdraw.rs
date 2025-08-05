@@ -167,16 +167,10 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
     );
     token::burn(burn_ctx, lp_amount)?;
 
-    // Get pool account info before transfers to avoid borrow conflicts
     let pool_account_info = ctx.accounts.pool.to_account_info();
 
-    // Obtain Pubkey references directly from the AccountInfo objects.
-    // These references will have the same lifetime as the context ('info).
     let coin_mint_key_ref: &[u8] = ctx.accounts.coin_vault_mint.to_account_info().key.as_ref();
     let pc_mint_key_ref: &[u8] = ctx.accounts.pc_vault_mint.to_account_info().key.as_ref();
-
-    // Directly reference the nonce field, which is now a [u8; 1] array.
-    // This reference will have the same lifetime as ctx.accounts.pool.
     let bump_seed_ref: &[u8] = &ctx.accounts.pool.nonce;
 
     // Define the common signer seeds for both transfers
@@ -192,7 +186,9 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
     let mut remaining_accounts_coin: Vec<AccountInfo> = Vec::new();
     if ctx.accounts.coin_vault_mint.to_account_info().owner == &spl_token_2022::ID {
         if let Ok(mint_data_with_extensions) =
-            StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&ctx.accounts.coin_vault_mint.to_account_info().data.borrow())
+            StateWithExtensions::<spl_token_2022::state::Mint>::unpack(
+                &ctx.accounts.coin_vault_mint.to_account_info().data.borrow(),
+            )
         {
             if let Ok(_transfer_hook_extension) =
                 mint_data_with_extensions.get_extension::<TransferHook>()
@@ -216,7 +212,8 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
         ctx.accounts.coin_token_program_id.to_account_info(),
         transfer_accounts_coin,
         signer_seeds,
-    ).with_remaining_accounts(remaining_accounts_coin);
+    )
+    .with_remaining_accounts(remaining_accounts_coin);
 
     anchor_spl::token_interface::transfer(transfer_ctx_coin, coin_amount)?;
 
@@ -224,7 +221,9 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
     let mut remaining_accounts_pc: Vec<AccountInfo> = Vec::new();
     if ctx.accounts.pc_vault_mint.to_account_info().owner == &spl_token_2022::ID {
         if let Ok(mint_data_with_extensions) =
-            StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&ctx.accounts.pc_vault_mint.to_account_info().data.borrow())
+            StateWithExtensions::<spl_token_2022::state::Mint>::unpack(
+                &ctx.accounts.pc_vault_mint.to_account_info().data.borrow(),
+            )
         {
             if let Ok(_transfer_hook_extension) =
                 mint_data_with_extensions.get_extension::<TransferHook>()
@@ -248,7 +247,8 @@ pub fn withdraw(ctx: Context<Withdraw>, lp_amount: u64) -> Result<()> {
         ctx.accounts.pc_token_program_id.to_account_info(),
         transfer_accounts_pc,
         signer_seeds,
-    ).with_remaining_accounts(remaining_accounts_pc);
+    )
+    .with_remaining_accounts(remaining_accounts_pc);
 
     anchor_spl::token_interface::transfer(transfer_ctx_pc, pc_amount)?;
 
@@ -298,9 +298,8 @@ fn validate_transfer_hook_program<'a>(
                             return true;
                         }
                     }
-                    return false; // Hook program not whitelisted
+                    return false;
                 } else {
-                    // Mint doesn't have transfer hook but program was provided - invalid
                     return false;
                 }
             }
