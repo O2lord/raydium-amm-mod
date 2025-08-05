@@ -1,6 +1,5 @@
 use crate::error::TradiumError;
 use crate::shared; // Import shared module
-use crate::shared;
 use crate::state::Tradium;
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, MintTo, Token, TokenAccount, Transfer};
@@ -152,15 +151,11 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
     require!(lp_amount > 0, TradiumError::InsufficientLiquidityMinted);
 
     // Create mint authority seeds for PDA signing
-    let mint_authority_bump = pool.nonce[0]; // Access the u8 value from the [u8; 1] array
+    let mint_authority_bump = pool.nonce[0];
     let pool_key = pool.key();
-    // The seeds themselves should be &[&[u8]]
-    let mint_authority_seeds = &[
-        b"mint_authority",
-        pool_key.as_ref(),
-        &[mint_authority_bump] // Create a temporary slice from the u8
-    ];
-    let signer_seeds = &[mint_authority_seeds]; // This is &[&[&[u8]]]
+    let mint_authority_seeds: &[&[u8]] =
+        &[b"mint_authority", pool_key.as_ref(), &[mint_authority_bump]];
+    let signer_seeds: &[&[&[u8]]] = &[mint_authority_seeds];
 
     // Mint LP tokens to user
     let mint_ctx = CpiContext::new_with_signer(
@@ -170,7 +165,7 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
             to: ctx.accounts.user_lp_account.to_account_info(),
             authority: pool.to_account_info(),
         },
-        signer_seeds, // Pass the correctly structured signer_seeds
+        signer_seeds,
     );
 
     token::mint_to(mint_ctx, lp_amount)?;
@@ -182,7 +177,6 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
         .ok_or(TradiumError::MathOverflow)?;
 
     // Update nonce for security
-    // Increment the u8 value inside the array
     pool.nonce[0] = pool.nonce[0]
         .checked_add(1)
         .ok_or(TradiumError::MathOverflow)?;
@@ -197,56 +191,6 @@ pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Resul
     Ok(())
 }
 
-fn validate_transfer_hook_program(
-    mint: &InterfaceAccount<MintInterface>,
-    transfer_hook_program: &AccountInfo,
-    whitelisted_hooks: &[Pubkey],
-    num_whitelisted: u8,
-) -> bool {
-    // Check if mint has transfer hook extension
-    let mint_info = mint.to_account_info();
-    let mint_data = mint_info.data.borrow();
-
-    // For Token-2022 mints, check for transfer hook extension
-    if mint_info.owner == &spl_token_2022::ID {
-        match StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_data) {
-            Ok(mint_with_extensions) => {
-                if let Ok(transfer_hook_account) =
-                    mint_with_extensions.get_extension::<TransferHook>()
-                {
-                    // Mint has transfer hook - validate the provided program
-                    let hook_program_id =
-                        if let Some(pubkey) = transfer_hook_account.program_id.into() {
-                            pubkey
-                        } else {
-                            return false;
-                        };
-
-                    // Check if the hook program matches the mint's hook
-                    if transfer_hook_program.key() != hook_program_id {
-                        return false;
-                    }
-
-                    // Check if the hook program is whitelisted
-                    for i in 0..(num_whitelisted as usize) {
-                        if whitelisted_hooks[i] == hook_program_id {
-                            return true;
-                        }
-                    }
-                    return false; // Hook program not whitelisted
-                } else {
-                    // Mint doesn't have transfer hook but program was provided - invalid
-                    return false;
-                }
-            }
-            Err(_) => return false,
-        }
-    } else {
-        // Regular SPL token but program was provided - invalid
-        return false;
-    }
-}
-
 fn calculate_lp_tokens(
     pool: &Tradium,
     amount_coin: u64,
@@ -256,7 +200,6 @@ fn calculate_lp_tokens(
     total_lp_supply: u64,
 ) -> Result<u64> {
     let lp_amount = if total_lp_supply == 0 {
-        // Initial deposit - use geometric mean with proper decimal handling
         let coin_amount_normalized =
             normalize_amount(amount_coin, pool.coin_decimals, pool.sys_decimal_value)?;
         let pc_amount_normalized =
