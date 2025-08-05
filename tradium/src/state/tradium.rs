@@ -1,13 +1,14 @@
+// programs/state/tradium.rs
 use anchor_lang::prelude::*;
 
 pub const MAX_ORDER_LIMIT: usize = 10;
 pub const MAX_WHITELISTED_HOOKS: usize = 10;
 
 #[account]
-#[derive(Default, PartialEq)]
+#[derive(Default, PartialEq, Debug, InitSpace)] // Add InitSpace here
 pub struct Tradium {
     pub status: u64,
-    pub nonce: [u8; 1], // Ensure this is [u8; 1] for proper lifetime handling
+    pub nonce: [u8; 1],
     pub order_num: u64,
     pub depth: u64,
     pub coin_decimals: u64,
@@ -33,13 +34,11 @@ pub struct Tradium {
     pub market: Pubkey,
     pub market_program: Pubkey,
     pub target_orders: Pubkey,
-    // Add token program fields
     pub coin_token_program: Pubkey,
     pub pc_token_program: Pubkey,
-    // Add whitelisted transfer hooks
     pub whitelisted_transfer_hooks: [Pubkey; MAX_WHITELISTED_HOOKS],
     pub num_whitelisted_hooks: u8,
-    pub padding1: [u64; 6], // Reduced padding to accommodate new fields
+    pub padding1: [u64; 6],
     pub amm_owner: Pubkey,
     pub lp_amount: u64,
     pub client_order_id: u64,
@@ -47,7 +46,7 @@ pub struct Tradium {
     pub padding2: u64,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Default, PartialEq)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default, PartialEq, Debug, InitSpace)] // Change AnchorSize to InitSpace
 pub struct Fees {
     pub min_separate_numerator: u64,
     pub min_separate_denominator: u64,
@@ -59,7 +58,7 @@ pub struct Fees {
     pub swap_fee_denominator: u64,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default, PartialEq)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Default, PartialEq, Debug, InitSpace)] // Change AnchorSize to InitSpace
 pub struct StateData {
     pub initialized: bool,
     pub nonce: u8,
@@ -101,41 +100,4 @@ pub struct StateData {
     pub pool_pc_amount: u64,
     pub pool_lp_amount: u64,
     pub padding: [u64; 3],
-}
-
-#[derive(Clone, Copy)]
-pub struct TargetOrder {
-    pub price: u64,
-    pub coin_qty: u64,
-    pub pc_qty: u64,
-    pub client_id: u64,
-}
-
-#[derive(Clone, Copy)]
-pub struct TargetOrders {
-    pub owner: [u64; 4],
-    pub buy_orders: [TargetOrder; 50],
-    pub padding1: [u64; 8],
-    pub target_x: u128,
-    pub target_y: u128,
-    pub plan_x_buy: u128,
-    pub plan_y_buy: u128,
-    pub plan_x_sell: u128,
-    pub plan_y_sell: u128,
-    pub placed_x: u128,
-    pub placed_y: u128,
-    pub calc_pnl_x: u128,
-    pub calc_pnl_y: u128,
-    pub sell_orders: [TargetOrder; 50],
-    pub padding2: [u64; 6],
-    pub replace_buy_client_id: [u64; MAX_ORDER_LIMIT],
-    pub replace_sell_client_id: [u64; MAX_ORDER_LIMIT],
-    pub last_order_numerator: u64,
-    pub last_order_denominator: u64,
-    pub plan_orders_cur: u64,
-    pub place_orders_cur: u64,
-    pub valid_buy_order_num: u64,
-    pub valid_sell_order_num: u64,
-    pub padding3: [u64; 10],
-    pub free_slot_bits: u128,
 }
