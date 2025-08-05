@@ -14,7 +14,7 @@ use crate::shared;
 pub mod state;
 pub use state::*;
 
-declare_id!("9cmTderZ6Sthr4UYNvc3sdLyZDDw5fnzed2PtnyP4ZF7");
+declare_id!("B2Sk1Fk1UCorbCvwkWRAZAp75DnNULia9ceuFHYgV1cK");
 
 #[program]
 pub mod tradium {
@@ -26,7 +26,7 @@ pub mod tradium {
         initial_coin_amount: u64,
         initial_pc_amount: u64,
     ) -> Result<()> {
-        instructions::initialize_pool(ctx, bump, initial_coin_amount, initial_pc_amount)
+        instructions::initialize_pool(ctx, initial_coin_amount, initial_pc_amount)
     }
 
     pub fn deposit(ctx: Context<Deposit>, amount_coin: u64, amount_pc: u64) -> Result<()> {
